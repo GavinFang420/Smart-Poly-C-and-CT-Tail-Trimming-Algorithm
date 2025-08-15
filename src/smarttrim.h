@@ -45,15 +45,29 @@ using namespace std;
  */
 class SmartTrim {
 public:
+    // Trimming modes
+    enum TrimMode {
+        POLY_C_MODE = 0,    // Pure poly-C tail trimming (default)
+        POLY_CT_MODE = 1    // Poly-C/CT tail trimming (future development)
+    };
+    
     // Configuration parameters
     struct Config {
+        TrimMode mode = POLY_C_MODE;    // Trimming mode: C-only or C+T
         int window_size = 30;           // Analysis window size (last 30bp)
         int c_score = 10;              // Score for C base appearance
-        int penalty_score = -20;       // Penalty for A/G/T bases
+        int t_score = -5;              // Score for T base (varies by mode)
+        int penalty_score = -20;       // Penalty for A/G bases
         double end_weight_multiplier = 3.0;  // Weight multiplier for last 10bp
+        
+        // Poly-C mode validation parameters
+        double min_c_ratio = 0.80;     // Minimum C ratio for poly-C validation (80%)
+        
+        // Poly-CT mode validation parameters (future use)
         double min_ct_ratio = 0.85;    // Minimum C+T ratio for validation (85%)
         double max_t_ratio = 0.15;     // Maximum T ratio in C+T content (15%)
-        bool enable_ct_validation = true;    // Enable C+T ratio validation
+        
+        bool enable_validation = true;       // Enable composition validation
         bool enable_position_decay = true;   // Enable distance decay weighting
         int min_trim_length = 1;       // Minimum bases to trim
         int max_trim_length = 25;      // Maximum bases to trim
@@ -100,12 +114,20 @@ public:
     void setConfig(const Config& cfg);
     Config getConfig() const;
     
+    // Mode management
+    void setTrimMode(TrimMode mode);
+    TrimMode getTrimMode() const;
+    
     // Parameter tuning methods
     void setWindowSize(int size);
     void setCScore(int score);
+    void setTScore(int score);          // Separate T score setting
     void setPenaltyScore(int score);
     void setEndWeightMultiplier(double multiplier);
-    void setCTValidation(bool enable, double min_ct_ratio = 0.85, double max_t_ratio = 0.15);
+    
+    // Validation settings by mode
+    void setPolyCValidation(bool enable, double min_c_ratio = 0.80);
+    void setPolyCTValidation(bool enable, double min_ct_ratio = 0.85, double max_t_ratio = 0.15);
     void setTrimLengthRange(int min_length, int max_length);
     
     // Statistics and reporting
@@ -126,6 +148,9 @@ public:
     static double calculateCTRatio(const string& sequence);
     static bool isPolyC(const string& sequence, double threshold = 0.8);
     static bool isPolyCT(const string& sequence, double ct_threshold = 0.85, double t_threshold = 0.15);
+    
+    // Mode-specific analysis
+    bool validateSequenceComposition(const string& sequence, TrimMode mode);
     
     // Version and algorithm info
     static string getVersion();
