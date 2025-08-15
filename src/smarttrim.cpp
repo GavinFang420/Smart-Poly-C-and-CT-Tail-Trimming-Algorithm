@@ -1,4 +1,34 @@
-/*
+// Validate C+T ratio in trimmed region (for CT mode)
+bool SmartTrim::validateCTRatio(const string& sequence, int start_pos, int length) {
+    string region = sequence.substr(start_pos, length);
+    if (region.empty()) return false;
+    
+    int c_count = 0, t_count = 0, total_count = 0;
+    
+    for (char base : region) {
+        switch (base) {
+            case 'C': case 'c': c_count++; total_count++; break;
+            case 'T': case 't': t_count++; total_count++; break;
+            case 'A': case 'a': case 'G': case 'g': total_count++; break;
+            // Skip N bases from validation
+        }
+    }
+    
+    if (total_count == 0) return false;
+    
+    double ct_ratio = (double)(c_count + t_count) / total_count;
+    double t_in_ct_ratio = (c_count + t_count > 0) ? (double)t_count / (c_count + t_count) : 0.0;
+    
+    // Update statistics
+    stats.avg_ct_ratio = (stats.avg_ct_ratio * (stats.reads_trimmed) + ct_ratio) / (stats.reads_trimmed + 1);
+    stats.avg_c_content = (stats.avg_c_content * (stats.reads_trimmed) + (double)c_count / total_count) / (stats.reads_trimmed + 1);
+    
+    // Validation: C+T ratio >= min_ct_ratio AND T ratio in C+T <= max_t_ratio
+    bool validation_result = (ct_ratio >= config.min_ct_ratio) && (t_in_ct_ratio <= config.max_t_ratio);
+    stats.validation_passed = validation_result;
+    
+    return validation_result;
+}/*
 MIT License
 
 Copyright (c) 2017 OpenGene
@@ -34,7 +64,9 @@ using namespace std;
 
 // Constructor implementations
 SmartTrim::SmartTrim() {
-    // Use default configuration
+    // Default to poly-C mode for initial development
+    config.mode = POLY_C_MODE;
+    config.t_score = -15;  // T gets penalty in poly-C mode
 }
 
 SmartTrim::SmartTrim(const Config& cfg) : config(cfg) {
@@ -48,8 +80,16 @@ SmartTrim::SmartTrim(const Config& cfg) : config(cfg) {
     if (config.penalty_score >= 0) {
         throw InvalidConfigException("Penalty score must be negative");
     }
-    if (config.min_ct_ratio < 0.5 || config.min_ct_ratio > 1.0) {
-        throw InvalidConfigException("Minimum C+T ratio must be between 0.5 and 1.0");
+    
+    // Mode-specific validation
+    if (config.mode == POLY_C_MODE) {
+        if (config.min_c_ratio < 0.5 || config.min_c_ratio > 1.0) {
+            throw InvalidConfigException("Minimum C ratio must be between 0.5 and 1.0");
+        }
+    } else if (config.mode == POLY_CT_MODE) {
+        if (config.min_ct_ratio < 0.5 || config.min_ct_ratio > 1.0) {
+            throw InvalidConfigException("Minimum C+T ratio must be between 0.5 and 1.0");
+        }
     }
 }
 
@@ -81,10 +121,10 @@ pair<Read*, Read*> SmartTrim::trimReads(const Read* r1, const Read* r2) {
         return make_pair(new Read(*r1), new Read(*r2));
     }
     
-    // Step 4: Validate C+T ratio if enabled
-    if (config.enable_ct_validation) {
+    // Step 4: Validate composition based on mode
+    if (config.enable_validation) {
         string trimmed_region = analysis_window.substr(analysis_window.length() - cut_point);
-        if (!validateCTRatio(trimmed_region, 0, trimmed_region.length())) {
+        if (!validateSequenceComposition(trimmed_region, config.mode)) {
             // Validation failed, return original reads
             return make_pair(new Read(*r1), new Read(*r2));
         }
@@ -122,26 +162,31 @@ pair<Read*, Read*> SmartTrim::trimReads(const Read* r1, const Read* r2) {
     return make_pair(trimmed_r1, trimmed_r2);
 }
 
-// Base scoring with position weights
+// Base scoring with mode-aware T handling
 double SmartTrim::calculateBaseScore(char base, int position, int total_length) {
     double base_score = 0.0;
     
-    // Base scoring: C gets positive score, others get penalty
+    // Base scoring depends on trim mode
     switch (base) {
         case 'C':
         case 'c':
-            base_score = config.c_score;
+            base_score = config.c_score;  // Always positive for C
             break;
         case 'T':
         case 't':
-            // T gets smaller penalty in CT trimming mode
-            base_score = config.penalty_score * 0.3;  // Reduced penalty for T
+            if (config.mode == POLY_C_MODE) {
+                // In poly-C mode, T is undesired (gets penalty)
+                base_score = config.t_score;  // Negative score
+            } else if (config.mode == POLY_CT_MODE) {
+                // In poly-CT mode, T is acceptable (small penalty or neutral)
+                base_score = config.t_score;  // Can be adjusted for CT mode
+            }
             break;
         case 'A':
         case 'a':
         case 'G':
         case 'g':
-            base_score = config.penalty_score;
+            base_score = config.penalty_score;  // Heavy penalty
             break;
         case 'N':
         case 'n':
@@ -215,38 +260,23 @@ int SmartTrim::findOptimalCutPoint(const vector<double>& scores) {
     return (best_score > 0) ? best_cut_point : 0;
 }
 
-// Validate C+T ratio in trimmed region
-bool SmartTrim::validateCTRatio(const string& sequence, int start_pos, int length) {
-    if (!config.enable_ct_validation) return true;
+// Mode-aware sequence composition validation
+bool SmartTrim::validateSequenceComposition(const string& sequence, TrimMode mode) {
+    if (!config.enable_validation || sequence.empty()) return true;
     
-    string region = sequence.substr(start_pos, length);
-    if (region.empty()) return false;
-    
-    int c_count = 0, t_count = 0, total_count = 0;
-    
-    for (char base : region) {
-        switch (base) {
-            case 'C': case 'c': c_count++; total_count++; break;
-            case 'T': case 't': t_count++; total_count++; break;
-            case 'A': case 'a': case 'G': case 'g': total_count++; break;
-            // Skip N bases from validation
-        }
+    if (mode == POLY_C_MODE) {
+        // Poly-C mode: validate high C content
+        double c_content = calculateCContent(sequence);
+        stats.avg_c_content = (stats.avg_c_content * stats.reads_trimmed + c_content) / (stats.reads_trimmed + 1);
+        stats.validation_passed = (c_content >= config.min_c_ratio);
+        return stats.validation_passed;
+        
+    } else if (mode == POLY_CT_MODE) {
+        // Poly-CT mode: validate C+T ratio and T proportion
+        return validateCTRatio(sequence, 0, sequence.length());
     }
     
-    if (total_count == 0) return false;
-    
-    double ct_ratio = (double)(c_count + t_count) / total_count;
-    double t_in_ct_ratio = (c_count + t_count > 0) ? (double)t_count / (c_count + t_count) : 0.0;
-    
-    // Update statistics
-    stats.avg_ct_ratio = (stats.avg_ct_ratio * (stats.reads_trimmed) + ct_ratio) / (stats.reads_trimmed + 1);
-    stats.avg_c_content = (stats.avg_c_content * (stats.reads_trimmed) + (double)c_count / total_count) / (stats.reads_trimmed + 1);
-    
-    // Validation: C+T ratio >= min_ct_ratio AND T ratio in C+T <= max_t_ratio
-    bool validation_result = (ct_ratio >= config.min_ct_ratio) && (t_in_ct_ratio <= config.max_t_ratio);
-    stats.validation_passed = validation_result;
-    
-    return validation_result;
+    return true;
 }
 
 // Merge reads for analysis
@@ -295,6 +325,22 @@ SmartTrim::Config SmartTrim::getConfig() const {
     return config;
 }
 
+// Mode management
+void SmartTrim::setTrimMode(TrimMode mode) {
+    config.mode = mode;
+    
+    // Adjust T score based on mode
+    if (mode == POLY_C_MODE) {
+        config.t_score = -15;  // T gets penalty in poly-C mode
+    } else if (mode == POLY_CT_MODE) {
+        config.t_score = -2;   // T gets smaller penalty in poly-CT mode
+    }
+}
+
+SmartTrim::TrimMode SmartTrim::getTrimMode() const {
+    return config.mode;
+}
+
 // Parameter tuning methods
 void SmartTrim::setWindowSize(int size) {
     if (size < 10 || size > 50) {
@@ -308,6 +354,10 @@ void SmartTrim::setCScore(int score) {
         throw InvalidConfigException("C score must be positive");
     }
     config.c_score = score;
+}
+
+void SmartTrim::setTScore(int score) {
+    config.t_score = score;
 }
 
 void SmartTrim::setPenaltyScore(int score) {
@@ -324,8 +374,13 @@ void SmartTrim::setEndWeightMultiplier(double multiplier) {
     config.end_weight_multiplier = multiplier;
 }
 
-void SmartTrim::setCTValidation(bool enable, double min_ct_ratio, double max_t_ratio) {
-    config.enable_ct_validation = enable;
+void SmartTrim::setPolyCValidation(bool enable, double min_c_ratio) {
+    config.enable_validation = enable;
+    config.min_c_ratio = min_c_ratio;
+}
+
+void SmartTrim::setPolyCTValidation(bool enable, double min_ct_ratio, double max_t_ratio) {
+    config.enable_validation = enable;
     config.min_ct_ratio = min_ct_ratio;
     config.max_t_ratio = max_t_ratio;
 }
@@ -351,24 +406,36 @@ string SmartTrim::generateReport() const {
     ostringstream report;
     
     report << "=== Smart Poly-C/CT Tail Trimming Report ===" << endl;
+    report << "Trim mode: " << (config.mode == POLY_C_MODE ? "POLY-C" : "POLY-CT") << endl;
     report << "Total reads processed: " << stats.total_reads_processed << endl;
     report << "Reads trimmed: " << stats.reads_trimmed << endl;
     report << "Trimming rate: " << fixed << setprecision(2) 
            << (stats.total_reads_processed > 0 ? (double)stats.reads_trimmed / stats.total_reads_processed * 100 : 0) << "%" << endl;
     report << "Average trim length: " << stats.avg_trim_length << " bp" << endl;
     report << "Average C content: " << fixed << setprecision(4) << stats.avg_c_content * 100 << "%" << endl;
-    report << "Average C+T ratio: " << fixed << setprecision(4) << stats.avg_ct_ratio * 100 << "%" << endl;
+    
+    if (config.mode == POLY_CT_MODE) {
+        report << "Average C+T ratio: " << fixed << setprecision(4) << stats.avg_ct_ratio * 100 << "%" << endl;
+    }
+    
     report << "Last validation result: " << (stats.validation_passed ? "PASSED" : "FAILED") << endl;
     
     report << "\n=== Algorithm Configuration ===" << endl;
+    report << "Trim mode: " << (config.mode == POLY_C_MODE ? "POLY-C" : "POLY-CT") << endl;
     report << "Window size: " << config.window_size << " bp" << endl;
     report << "C score: " << config.c_score << endl;
+    report << "T score: " << config.t_score << endl;
     report << "Penalty score: " << config.penalty_score << endl;
     report << "End weight multiplier: " << config.end_weight_multiplier << "x" << endl;
-    report << "C+T validation: " << (config.enable_ct_validation ? "ENABLED" : "DISABLED") << endl;
-    if (config.enable_ct_validation) {
-        report << "  Min C+T ratio: " << fixed << setprecision(2) << config.min_ct_ratio * 100 << "%" << endl;
-        report << "  Max T ratio in C+T: " << fixed << setprecision(2) << config.max_t_ratio * 100 << "%" << endl;
+    report << "Validation: " << (config.enable_validation ? "ENABLED" : "DISABLED") << endl;
+    
+    if (config.enable_validation) {
+        if (config.mode == POLY_C_MODE) {
+            report << "  Min C ratio: " << fixed << setprecision(2) << config.min_c_ratio * 100 << "%" << endl;
+        } else if (config.mode == POLY_CT_MODE) {
+            report << "  Min C+T ratio: " << fixed << setprecision(2) << config.min_ct_ratio * 100 << "%" << endl;
+            report << "  Max T ratio in C+T: " << fixed << setprecision(2) << config.max_t_ratio * 100 << "%" << endl;
+        }
     }
     
     return report.str();
