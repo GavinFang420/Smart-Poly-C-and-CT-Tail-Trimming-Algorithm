@@ -26,5 +26,11 @@ Distance Decay原理: 越靠近序列中段，越不应该被切除 （权重越
 2. Intelligent scoring → Identify optimal polyC/CT regions (Distance-Decay Scoring Algo)
 3. Position mapping → Find corresponding positions in original R1/R2 (Use recorded index to locate positions)
 4. Precise trimming → Trim original R1/R2 separately (maintain pair structure, will not return merged Reads)
-5. Validation → Verify 85%C + 15%T ratio in trimmed regions (?????????)
+5. Validation → Verify 85%C + 15%T ratio in trimmed regions (Will Tune, ONLY FOR CT tailing OPTION)
 
+## Features
+Preserves read pairing: Outputs separate R1/R2 files, not merged
+Position-aware: Higher weights for sequence ends
+Ratio validation: Confirms trimmed regions match expected C/T composition (for CT tailing Only, will develop)
+R1 preservation: Saves valuable R1 data that traditional tools waste (Single Chain)
+Fast: Theoretical Time Complexity O(n)
