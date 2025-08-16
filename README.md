@@ -1,5 +1,9 @@
 # 项目介绍 - 开发中
 本项目主要解决Poly C tail相关的问题，CT tail不在初期考虑范围内
+
+同时可以避免去duplicate因为不同C tail长度不同导致意外去重两个不同的read
+e.g. 148+2Ctail和145+5Ctail被意外去重了
+
 ## 问题与现状
 针对单链建库，目前fastq的tail trimming有两个问题（2025/08/15未找到相关改进算法paper）：
 1. Under Trimming - Some R2 heads that are longer than 15bp (the fastq recommended value), resulting in some short residues.
