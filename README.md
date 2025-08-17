@@ -1,8 +1,10 @@
 # 项目介绍 - 开发中
 本项目主要解决Poly C tail相关的问题，CT tail不在初期考虑范围内
 
-同时可以避免去duplicate因为不同C tail长度不同导致意外去重两个不同的read
-e.g. 148+2Ctail和145+5Ctail被意外去重了
+目标是在 WGBS / 单链建库流程中，开发一个更加智能的 tail trimming 算法，避免传统方法带来的过度剪切或不足剪切问题。
+
+同时，本方法可以避免 因不同 C tail 长度而误去重 的情况。
+例如：148bp + 2C tail 和 145bp + 5C tail，虽然真实片段不同，但传统去重算法可能误判为重复。
 
 ## 问题与现状
 针对单链建库，目前fastq的tail trimming有两个问题（2025/08/15未找到相关改进算法paper）：
@@ -31,6 +33,9 @@ Distance Decay原理: 越靠近序列中段，越不应该被切除 （权重越
 3. Position mapping → Find corresponding positions in original R1/R2 (Use recorded index to locate positions)
 4. Precise trimming → Trim original R1/R2 separately (maintain pair structure, will not return merged Reads)
 5. Validation → Verify 85%C + 15%T ratio in trimmed regions (Will Tune, ONLY FOR CT tailing OPTION)
+
+## 使用方法
+目前我们使用 fastp 先做 adapter trimming，随后运行本项目的 polyC tail trimming 模块.
 
 ## Features
 Preserves read pairing: Outputs separate R1/R2 files, not merged
