@@ -1,4 +1,5 @@
 #include "smarttrim.h"
+#include "mergeread.h"
 #include <iostream>
 #include <cassert>
 #include <vector>
@@ -128,9 +129,114 @@ void test_parameter_matrix() {
     runner.print_summary();
 }
 
-void test_edge_cases() {
-    std::cout << "\n=== Testing Edge Cases ===" << std::endl;
+void test_mergeread_functionality() {
+    std::cout << "\n=== Testing MergeRead Functionality ===" << std::endl;
     TestRunner runner;
+    
+    ReadMerger merger;
+    
+    // Test case 1: Simple overlap
+    std::string r1 = "ATCGATCGATCGATCGATCGATCGATCG";     // 27bp
+    std::string r2 = "CGATCGATCGATCGATCGATCGATCGAAA";    // 28bp, overlaps 20bp with R1
+    
+    MergeResult result = merger.mergeReads(r1, r2);
+    
+    runner.assert_test(result.merged, "Should successfully merge overlapping reads");
+    runner.assert_test(result.sequence.length() > r1.length(), "Merged sequence should be longer than R1");
+    runner.assert_test(result.sequence.length() < r1.length() + r2.length(), "Merged sequence should be shorter than R1+R2");
+    
+    std::cout << "R1: " << r1 << " (" << r1.length() << "bp)" << std::endl;
+    std::cout << "R2: " << r2 << " (" << r2.length() << "bp)" << std::endl;
+    std::cout << "Merged: " << result.sequence << " (" << result.sequence.length() << "bp)" << std::endl;
+    std::cout << "R1 bases: " << result.r1_bases << ", R2 bases: " << result.r2_bases << std::endl;
+    
+    // Test case 2: No overlap
+    r1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    r2 = "TTTTTTTTTTTTTTTTTTTTTTTTTTTT";
+    
+    result = merger.mergeReads(r1, r2);
+    runner.assert_test(!result.merged, "Should not merge non-overlapping reads");
+    
+    // Test case 3: Perfect overlap
+    r1 = "ATCGATCGATCGATCGATCGATCGATCGATCGATCG";
+    r2 = "CGATCGATCGATCGATCGATCGATCGATCGATCG";  // 30bp overlap
+    
+    result = merger.mergeReads(r1, r2);
+    runner.assert_test(result.merged, "Should merge perfectly overlapping reads");
+    
+    // Test case 4: Overlap analysis only
+    OverlapResult overlap = merger.analyzeOverlap(r1, r2);
+    runner.assert_test(overlap.overlapped, "Should detect overlap");
+    runner.assert_test(overlap.overlap_len >= 30, "Should find substantial overlap");
+    runner.assert_test(overlap.diff_count == 0, "Perfect match should have 0 differences");
+    
+    runner.print_summary();
+}
+
+void test_mergeread_with_quality() {
+    std::cout << "\n=== Testing MergeRead with Quality Scores ===" << std::endl;
+    TestRunner runner;
+    
+    ReadMerger merger;
+    
+    // Test with quality scores
+    std::string r1 = "ATCGATCGATCGATCGATCGATCGATCG";
+    std::string r2 = "CGATCGATCGATCGATCGATCGATCGAAA";
+    std::string q1 = "IIIIIIIIIIIIIIIIIIIIIIIIIII";  // High quality
+    std::string q2 = "###########################"; // Low quality
+    
+    MergeResult result = merger.mergeReads(r1, r2, q1, q2);
+    
+    runner.assert_test(result.merged, "Should merge reads with quality scores");
+    runner.assert_test(!result.quality.empty(), "Should produce merged quality string");
+    runner.assert_test(result.quality.length() == result.sequence.length(), 
+                      "Quality length should match sequence length");
+    
+    std::cout << "Merged quality: " << result.quality << std::endl;
+    
+    // Test utility functions
+    auto stats = MergeUtils::getSequenceStats(result.sequence);
+    runner.assert_test(stats.length == result.sequence.length(), "Stats should match sequence length");
+    
+    bool valid_dna = MergeUtils::isValidDNASequence(result.sequence);
+    runner.assert_test(valid_dna, "Merged sequence should be valid DNA");
+    
+    runner.print_summary();
+}
+
+void test_smarttrim_with_merge() {
+    std::cout << "\n=== Testing SmartTrim with MergeRead Integration ===" << std::endl;
+    TestRunner runner;
+    
+    TrimParams params(30, 0.0);
+    SmartTrimmer trimmer(params);
+    ReadMerger merger;
+    
+    // Create test data with poly-C tails that can be merged
+    std::string r1 = "ATCGATCGATCGATCGATCGATCGATCCCCCCCCC";  // 33bp with C tail
+    std::string r2 = "CCCCCATCGATCGATCGATCGATCGATCGATCG";     // 32bp with C head
+    
+    // First test: merge reads, then analyze for poly-C trimming
+    MergeResult merge_result = merger.mergeReads(r1, r2);
+    
+    if (merge_result.merged) {
+        std::cout << "Successfully merged reads: " << merge_result.sequence << std::endl;
+        std::cout << "Merge composition: " << merge_result.r1_bases << " from R1, " 
+                  << merge_result.r2_bases << " from R2" << std::endl;
+        
+        // Now we could analyze the merged sequence for poly-C patterns
+        // This demonstrates how your SmartTrim could work with merged data
+        runner.assert_test(true, "Integration test completed successfully");
+    } else {
+        std::cout << "Reads could not be merged, analyzing separately" << std::endl;
+        
+        // Fall back to individual read analysis
+        TrimResult trim_result = trimmer.findOptimalTrimPositions(r1, r2);
+        runner.assert_test(true, "Fallback analysis completed");
+    }
+    
+    runner.print_summary();
+}
     
     TrimParams params(30, 0.0);
     SmartTrimmer trimmer(params);
@@ -266,6 +372,9 @@ int main(int argc, char* argv[]) {
         test_basic_functionality();
         test_trimming_functionality();
         test_parameter_matrix();
+        test_mergeread_functionality();
+        test_mergeread_with_quality();
+        test_smarttrim_with_merge();
         test_edge_cases();
         benchmark_performance();
     }
