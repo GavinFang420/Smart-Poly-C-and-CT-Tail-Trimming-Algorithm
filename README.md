@@ -46,7 +46,16 @@ Distance Decay 原理：
 - R1 preservation: Saves valuable R1 data that traditional tools waste (Single Chain)
 - Fast: Theoretical Time Complexity O(n)
 
+## 重要文件一览
+？？？？
+？？？
+？？？？
+？？？
+？？？？
+
 ## 引用/参照/致谢
 FASTQ处理模块基于 [fastp](https://github.com/OpenGene/fastp) 修改
+感谢纪博帮助提供的测试数据
+牢方当时的idea
 
 Copyright (c) 2017 OpenGene - MIT License
