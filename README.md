@@ -12,30 +12,30 @@
 3. Over Trimming - Valuable R1 tail is trimmed along with some overkill R2 head. The waste is huge, especially when R1 and R2 do not have overlap (sum >= 300bp, meaning 15 bp info in R1 is wasted regardless of R2).
 
 ## 基本假设与原理
-### 假设 - C/CT于R2末端富集 + 长度平均10bp
-C碱基稀有性: 盐转化后的C碱基十分稀有，只占序列的0.4% （99.5%的C都转化为了T）
-PolyC/CT尾C/CT富集性: 人工引入的polyC/CT段具有极高的C含量 （Tail长度最小为1，以10为中心呈正态分布）
-oligo长度特性: CT oligo通常长度在10bp左右，集中在序列末端
+### 假设 - C/CT于R2末端富集 + 长度平均8bp
+- PolyC/CT 尾富集：C/CT 序列主要集中在 R2 末端，平均长度约 8bp。
+- C 碱基稀有性：经亚硫酸氢盐处理后，C 在基因组中极为稀有，仅占约 0.4%（≈99.5% 的 C 被转化为 T）。
+- PolyC/CT 富集性：人工引入的 polyC/CT 段具有极高 C 含量（尾长度 ≥1bp，呈正态分布，均值 8bp）。
 
 ### 原理 - C tail位置衰减积分算法 应用于 R1+R2 Merged Sequence 
-Formula:
-  threshold = POGRESSIVE_SUM(Position (start from R2) * Scoring) + Base （Will Tune）
-  if threshold < 0 cut; else next
-Scoring:
-  C appearance - Add Unit Score
-  A,G,T appearance - Penalize （Negative Score）
-Distance Decay原理: 越靠近序列中段，越不应该被切除 （权重越小）
-  i.e. 靠近R2 Head部分的C更应该被切除，靠近R1尾部的C相对其他的C更应该被切除
+采用 位置衰减积分（Distance-Decay Integration）算法，在 R1+R2 拼接序列上识别 polyC 区域。
+Scoring 规则：
+- C 出现 → 加分
+- A/G/T 出现 → 扣分（负分）
+Distance Decay 原理：
+- 越靠近 R2 末端，C 的分数权重越大，更可能属于 polyC 尾 → 应该被剪除。
+- 越靠近 R1 尾部，权重越低，更可能是真实序列 → 应该被保留。
 
 ## 算法流程
-1. Merge Read1 + Read2 → Focus on last 30bp (WILL TUNE: 20/21/22/23/25/30)
-2. Intelligent scoring → Identify optimal polyC/CT regions (Distance-Decay Scoring Algo)
-3. Position mapping → Find corresponding positions in original R1/R2 (Use recorded index to locate positions)
-4. Precise trimming → Trim original R1/R2 separately (maintain pair structure, will not return merged Reads)
-5. Validation → Verify 85%C + 15%T ratio in trimmed regions (Will Tune, ONLY FOR CT tailing OPTION)
+1. 复制 & 合并：复制一份原始 reads → 构造 S = R2 头 K bp + R1 尾 K bp。
+2. 智能打分：在 S 上用调参后的距离衰减打分，识别最优 polyC 区域。
+3. 记录 index：在合并序列中找到 polyC 区域的起止坐标。
+4. 映射回原始 reads：将 index 映射到原始 R1、R2 上的对应位置。
+5. 精确剪切：直接对 原始 R1、R2 进行裁剪（保持 pair 结构，输出未合并的 reads）。
+6. 验证（仅 CT 版本时启用）：校验剪切区域的 C/T 比例是否接近 85%C : 15%T。
 
 ## 使用方法
-目前我们使用 fastp 先做 adapter trimming，随后运行本项目的 polyC tail trimming 模块.
+目前我们使用 fastp 先做 adapter trimming，随后运行本项目的 polyC tail trimming 模块。
 
 ## Features
 Preserves read pairing: Outputs separate R1/R2 files, not merged
