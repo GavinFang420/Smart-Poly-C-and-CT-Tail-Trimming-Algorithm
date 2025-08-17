@@ -19,9 +19,11 @@
 
 ### 原理 - C tail位置衰减积分算法 应用于 R1+R2 Merged Sequence 
 采用 位置衰减积分（Distance-Decay Integration）算法，在 R1+R2 拼接序列上识别 polyC 区域。
+
 Scoring 规则：
 - C 出现 → 加分
 - A/G/T 出现 → 扣分（负分）
+
 Distance Decay 原理：
 - 越靠近 R2 末端，C 的分数权重越大，更可能属于 polyC 尾 → 应该被剪除。
 - 越靠近 R1 尾部，权重越低，更可能是真实序列 → 应该被保留。
