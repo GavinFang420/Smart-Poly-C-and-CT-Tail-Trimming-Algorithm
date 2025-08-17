@@ -3,13 +3,14 @@ CXXFLAGS = -std=c++11 -Wall -Wextra -O2
 DEBUG_FLAGS = -g -DDEBUG
 
 # Source files
-SOURCES = smarttrim.cpp
-HEADERS = smarttrim.h
-TEST_SOURCES = unit_test.cpp
+SOURCES = src/smarttrim.cpp src/mergeread.cpp
+HEADERS = src/smarttrim.h src/mergeread.h
+TEST_SOURCES = tests/unit_test.cpp
 
-# Object files
-OBJECTS = $(SOURCES:.cpp=.o)
-TEST_OBJECTS = $(TEST_SOURCES:.cpp=.o)
+# Object files (put in build directory)
+BUILD_DIR = build
+OBJECTS = $(addprefix $(BUILD_DIR)/, $(notdir $(SOURCES:.cpp=.o)))
+TEST_OBJECTS = $(addprefix $(BUILD_DIR)/, $(notdir $(TEST_SOURCES:.cpp=.o)))
 
 # Executable names
 MAIN_EXEC = smarttrim
@@ -27,8 +28,18 @@ $(TEST_EXEC): $(OBJECTS) $(TEST_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 # Compile source files
-%.o: %.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
+
+# Create build directory and compile
+$(BUILD_DIR)/%.o: src/%.cpp $(HEADERS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
+
+$(BUILD_DIR)/%.o: tests/%.cpp $(HEADERS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
 
 # Debug build
 debug: CXXFLAGS += $(DEBUG_FLAGS)
@@ -36,7 +47,7 @@ debug: $(TEST_EXEC)
 
 # Clean build artifacts
 clean:
-	rm -f $(OBJECTS) $(TEST_OBJECTS) $(MAIN_EXEC) $(TEST_EXEC)
+	rm -rf $(BUILD_DIR) $(MAIN_EXEC) $(TEST_EXEC)
 
 # Run tests
 test: $(TEST_EXEC)
