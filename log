@@ -4,3 +4,4 @@ Format: Date(MO/DA/YEAR)+"  "(2*Spaces)+Description
 08/17/2025  Team Formed. Brainstormed Ideas, Distributed Tasks, and Modified Pipeline.
             用claude构建了基础代码，进行unit test并从鸡脖那里获得了数据 -- 下周准备用打通真实数据处理pipeline
 08/18/2025  Searched datasets for testing; 更新evaluation framework (reference: fastp)
+            他妈的烦死了.改了算法逻辑、跑通了txt和fastq文件 -- 遇到了一堆问题，可视化和参数分析的python还没修好。应该会需要继续做merge等等的分析--目前的参数是依托史
