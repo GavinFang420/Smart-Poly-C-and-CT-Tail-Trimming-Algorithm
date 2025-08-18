@@ -1,80 +1,140 @@
+# Compiler and flags
 CXX = g++
-CXXFLAGS = -std=c++11 -Wall -Wextra -O2
-DEBUG_FLAGS = -g -DDEBUG
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
+DEBUG_FLAGS = -std=c++17 -Wall -Wextra -g -DDEBUG
+RELEASE_FLAGS = -std=c++17 -Wall -Wextra -O3 -DNDEBUG
 
-# Source files
-SOURCES = src/smarttrim.cpp src/mergeread.cpp
-HEADERS = src/smarttrim.h src/mergeread.h
-TEST_SOURCES = tests/unit_test.cpp
-
-# Object files (put in build directory)
+# Directories
+SRC_DIR = src
 BUILD_DIR = build
-OBJECTS = $(addprefix $(BUILD_DIR)/, $(notdir $(SOURCES:.cpp=.o)))
-TEST_OBJECTS = $(addprefix $(BUILD_DIR)/, $(notdir $(TEST_SOURCES:.cpp=.o)))
+TEST_DIR = tests
 
-# Executable names
-MAIN_EXEC = smarttrim
-TEST_EXEC = unit_test
+# Source files (based on your actual source files in src/)
+SOURCES = mergeread.cpp smarttrim.cpp
+HEADERS = mergeread.h smarttrim.h
+
+# Add src/ prefix to sources and headers
+SRC_FILES = $(SOURCES:%=$(SRC_DIR)/%)
+HEADER_FILES = $(HEADERS:%=$(SRC_DIR)/%)
+
+# Object files
+OBJECTS = $(SOURCES:%.cpp=$(BUILD_DIR)/%.o)
+
+# Test files
+TEST_SOURCES = try_Ctail.cpp
+TEST_FILES = $(TEST_SOURCES:%=$(TEST_DIR)/%)
+
+# Executables
+MAIN_TARGET = ctail_trimmer
+TEST_TARGET = try_ctail_test
 
 # Default target
-all: $(MAIN_EXEC) $(TEST_EXEC)
+all: $(TEST_TARGET)
 
-# Main executable (if you want to create a standalone version later)
-$(MAIN_EXEC): $(OBJECTS)
-	$(CXX) $(CXXFLAGS) -o $@ $^
-
-# Test executable
-$(TEST_EXEC): $(OBJECTS) $(TEST_OBJECTS)
-	$(CXX) $(CXXFLAGS) -o $@ $^
-
-# Compile source files
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-# Create build directory and compile
-$(BUILD_DIR)/%.o: src/%.cpp $(HEADERS) | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD_DIR)/%.o: tests/%.cpp $(HEADERS) | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
+# Create build directory
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-# Debug build
-debug: CXXFLAGS += $(DEBUG_FLAGS)
-debug: $(TEST_EXEC)
+# Test executable (links with your source files)
+$(TEST_TARGET): $(BUILD_DIR) $(OBJECTS) $(BUILD_DIR)/try_Ctail.o
+	$(CXX) $(CXXFLAGS) $(OBJECTS) $(BUILD_DIR)/try_Ctail.o -o $@
 
-# Clean build artifacts
-clean:
-	rm -rf $(BUILD_DIR) $(MAIN_EXEC) $(TEST_EXEC)
+# Main executable (if you have a main.cpp later)
+$(MAIN_TARGET): $(BUILD_DIR) $(OBJECTS)
+	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@
+
+# Compile source files from src/ directory
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp $(HEADER_FILES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -I$(SRC_DIR) -c $< -o $@
+
+# Compile test files from tests/ directory
+$(BUILD_DIR)/try_Ctail.o: $(TEST_DIR)/try_Ctail.cpp $(HEADER_FILES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -I$(SRC_DIR) -c $< -o $@
+
+# Debug build
+debug: CXXFLAGS = $(DEBUG_FLAGS)
+debug: $(TEST_TARGET)
+
+# Release build
+release: CXXFLAGS = $(RELEASE_FLAGS)
+release: $(TEST_TARGET)
 
 # Run tests
-test: $(TEST_EXEC)
-	./$(TEST_EXEC)
+test: $(TEST_TARGET)
+	./$(TEST_TARGET)
 
-# Run tests with valgrind (memory check)
-memcheck: $(TEST_EXEC)
-	valgrind --leak-check=full --show-leak-kinds=all ./$(TEST_EXEC)
+# Run tests with valgrind (if available)
+test-memory: $(TEST_TARGET)
+	valgrind --leak-check=full --track-origins=yes ./$(TEST_TARGET)
 
-# Install (copy to /usr/local/bin, requires sudo)
-install: $(MAIN_EXEC)
-	sudo cp $(MAIN_EXEC) /usr/local/bin/
+# Extract test data from FASTQ files (adjusted for Windows Git Bash)
+prepare-test-data:
+	@echo "Extracting test data from FASTQ files..."
+	@if [ -f "/c/Users/fangy/Desktop/Ctail/normal_R1.fastq" ]; then \
+		head -n 200 "/c/Users/fangy/Desktop/Ctail/normal_R1.fastq" > normal_R1_200.txt; \
+		echo "Created normal_R1_200.txt"; \
+	else \
+		echo "Warning: /c/Users/fangy/Desktop/Ctail/normal_R1.fastq not found"; \
+	fi
+	@if [ -f "/c/Users/fangy/Desktop/Ctail/normal_R2.fastq" ]; then \
+		head -n 200 "/c/Users/fangy/Desktop/Ctail/normal_R2.fastq" > normal_R2_200.txt; \
+		echo "Created normal_R2_200.txt"; \
+	else \
+		echo "Warning: /c/Users/fangy/Desktop/Ctail/normal_R2.fastq not found"; \
+	fi
+	@if [ -f "/c/Users/fangy/Desktop/Ctail/tumor_R1.fastq" ]; then \
+		head -n 200 "/c/Users/fangy/Desktop/Ctail/tumor_R1.fastq" > tumor_R1_200.txt; \
+		echo "Created tumor_R1_200.txt"; \
+	else \
+		echo "Warning: /c/Users/fangy/Desktop/Ctail/tumor_R1.fastq not found"; \
+	fi
+	@if [ -f "/c/Users/fangy/Desktop/Ctail/tumor_R2.fastq" ]; then \
+		head -n 200 "/c/Users/fangy/Desktop/Ctail/tumor_R2.fastq" > tumor_R2_200.txt; \
+		echo "Created tumor_R2_200.txt"; \
+	else \
+		echo "Warning: /c/Users/fangy/Desktop/Ctail/tumor_R2.fastq not found"; \
+	fi
 
-# Uninstall
-uninstall:
-	sudo rm -f /usr/local/bin/$(MAIN_EXEC)
+# Alternative method using PowerShell (if Git Bash head doesn't work)
+prepare-test-data-ps:
+	@echo "Extracting test data using PowerShell..."
+	powershell -Command "if (Test-Path 'C:\\Users\\fangy\\Desktop\\Ctail\\normal_R1.fastq') { Get-Content 'C:\\Users\\fangy\\Desktop\\Ctail\\normal_R1.fastq' -Head 200 | Out-File 'normal_R1_200.txt' -Encoding utf8; Write-Host 'Created normal_R1_200.txt' }"
+	powershell -Command "if (Test-Path 'C:\\Users\\fangy\\Desktop\\Ctail\\normal_R2.fastq') { Get-Content 'C:\\Users\\fangy\\Desktop\\Ctail\\normal_R2.fastq' -Head 200 | Out-File 'normal_R2_200.txt' -Encoding utf8; Write-Host 'Created normal_R2_200.txt' }"
+	powershell -Command "if (Test-Path 'C:\\Users\\fangy\\Desktop\\Ctail\\tumor_R1.fastq') { Get-Content 'C:\\Users\\fangy\\Desktop\\Ctail\\tumor_R1.fastq' -Head 200 | Out-File 'tumor_R1_200.txt' -Encoding utf8; Write-Host 'Created tumor_R1_200.txt' }"
+	powershell -Command "if (Test-Path 'C:\\Users\\fangy\\Desktop\\Ctail\\tumor_R2.fastq') { Get-Content 'C:\\Users\\fangy\\Desktop\\Ctail\\tumor_R2.fastq' -Head 200 | Out-File 'tumor_R2_200.txt' -Encoding utf8; Write-Host 'Created tumor_R2_200.txt' }"
 
-# Generate parameter matrix test (will create 100+ configurations)
-benchmark: $(TEST_EXEC)
-	./$(TEST_EXEC) --benchmark
+# Clean build files
+clean:
+	rm -rf $(BUILD_DIR)
+	rm -f $(MAIN_TARGET) $(TEST_TARGET)
+	rm -f *.o *.exe
 
-# Format code (requires clang-format)
-format:
-	clang-format -i *.cpp *.h
+# Clean test data
+clean-test-data:
+	rm -f *_200.txt
 
-# Check code style
-lint:
-	cppcheck --enable=all --std=c++11 *.cpp *.h
+# Full clean
+clean-all: clean clean-test-data
 
-.PHONY: all debug clean test memcheck install uninstall benchmark format lint
+# Install (optional)
+install: $(TEST_TARGET)
+	cp $(TEST_TARGET) /usr/local/bin/
+
+# Help
+help:
+	@echo "Available targets:"
+	@echo "  all                  - Build test program (default)"
+	@echo "  debug                - Build with debug flags"
+	@echo "  release              - Build with optimization flags"
+	@echo "  test                 - Run test suite"
+	@echo "  test-memory          - Run tests with memory checking"
+	@echo "  prepare-test-data    - Extract first 200 lines from FASTQ files (Git Bash)"
+	@echo "  prepare-test-data-ps - Extract first 200 lines using PowerShell"
+	@echo "  clean                - Remove build files"
+	@echo "  clean-test-data      - Remove extracted test data"
+	@echo "  clean-all            - Remove all generated files"
+	@echo "  install              - Install to /usr/local/bin"
+	@echo "  help                 - Show this help"
+
+# Phony targets
+.PHONY: all debug release test test-memory prepare-test-data prepare-test-data-ps clean clean-test-data clean-all install help
