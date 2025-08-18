@@ -29,6 +29,9 @@ SOFTWARE.
 #include <string>
 #include <vector>
 
+// Forward declaration
+struct MergeResult;
+
 struct TrimParams {
     int window_size = 30;
     double c_score = 10.0;         // Fixed C score = +10
@@ -61,11 +64,17 @@ class SmartTrimmer {
 private:
     TrimParams params;
     
-    // Calculate progressive sum score for a sequence
+    // Legacy functions (keep for backward compatibility)
     double calculateProgressiveScore(const std::string& merged_seq);
-    
-    // Map merged sequence position back to R1/R2 positions
     std::pair<int, int> mapToOriginalPositions(int merge_pos, int r1_len, int r2_len);
+
+    // New functions for correct merge-based algorithm
+    double calculateProgressiveScore(const std::string& sequence, int start_pos, int end_pos);
+    TrimResult findOptimalTrimPositions_Window(const std::string& r1_seq, const std::string& r2_seq);
+    std::pair<int, int> mapMergedPositionToOriginal(int cut_length_in_r2, 
+                                                   const MergeResult& merge_result,
+                                                   int original_r1_length, 
+                                                   int original_r2_length);
 
 public:
     SmartTrimmer(const TrimParams& p) : params(p) {}

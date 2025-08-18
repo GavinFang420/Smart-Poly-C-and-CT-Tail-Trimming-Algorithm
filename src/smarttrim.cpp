@@ -1,49 +1,34 @@
 #include "smarttrim.h"
+#include "mergeread.h"
 #include <algorithm>
 #include <iostream>
 #include <cmath>
 
-double SmartTrimmer::calculateProgressiveScore(const std::string& merged_seq) {
+double SmartTrimmer::calculateProgressiveScore(const std::string& sequence, int start_pos, int end_pos) {
+    if (start_pos >= end_pos || start_pos < 0 || end_pos > sequence.length()) {
+        return params.initial_score;
+    }
+    
     double score = params.initial_score;
-    int seq_len = merged_seq.length();
-    int window_len = std::min(params.window_size, seq_len);
+    int region_len = end_pos - start_pos;
     
-    // Focus on the last window_size bases (tail region)
-    int start_pos = seq_len - window_len;
-    
-    for (int i = 0; i < window_len; i++) {
-        char base = merged_seq[start_pos + i];
-        double position_weight = params.position_weights[i];
+    // 分析指定区域，使用Distance-Decay权重
+    for (int i = 0; i < region_len; i++) {
+        char base = sequence[start_pos + i];
+        
+        // 位置权重：Distance-Decay，越靠近开头权重越大（因为是poly-C tail）
+        double position_weight = (i < params.position_weights.size()) ? 
+            params.position_weights[region_len - 1 - i] : 1.0;  // 反向权重
         
         if (base == 'C' || base == 'c') {
             score += params.c_score * position_weight;
         } else {
-            // A, G, T get penalty (including T, since we focus on polyC not polyC/T)
+            // A, G, T get penalty
             score += params.penalty_score * position_weight;
         }
     }
     
     return score;
-}
-
-std::pair<int, int> SmartTrimmer::mapToOriginalPositions(int merge_pos, int r1_len, int r2_len) {
-    // merge_pos is the position from the end of merged sequence to cut
-    // We need to map this back to original R1 and R2 positions
-    
-    int r1_trim = 0;  // How many bases to trim from R1 tail
-    int r2_trim = 0;  // How many bases to trim from R2 head
-    
-    if (merge_pos > r2_len) {
-        // Cut extends into R1
-        r2_trim = r2_len;  // Trim entire R2
-        r1_trim = merge_pos - r2_len;  // Remaining comes from R1
-    } else {
-        // Cut only affects R2
-        r2_trim = merge_pos;
-        r1_trim = 0;
-    }
-    
-    return std::make_pair(r1_trim, r2_trim);
 }
 
 TrimResult SmartTrimmer::findOptimalTrimPositions(
@@ -56,22 +41,30 @@ TrimResult SmartTrimmer::findOptimalTrimPositions(
         return result;  // Invalid input
     }
     
-    // Step 1: Merge R1 tail + R2 head (reverse R1 to get tail first)
-    std::string r1_tail = r1_seq.substr(std::max(0, (int)r1_seq.length() - params.window_size));
-    std::string r2_head = r2_seq.substr(0, std::min(params.window_size, (int)r2_seq.length()));
-    
-    // Reverse R1 tail so we have: R1_tail_reversed + R2_head
-    std::reverse(r1_tail.begin(), r1_tail.end());
-    std::string merged = r1_tail + r2_head;
+    // 直接分析R2开头的poly-C tail
+    // 不需要merge，直接检测R2序列开头
     
     double best_score = params.initial_score;
     int best_cut_pos = 0;
     
-    // Step 2: Try different cut positions and find the one with highest score
-    for (int cut_pos = 1; cut_pos <= merged.length() && cut_pos <= params.window_size; cut_pos++) {
-        // Get the tail segment that would be removed
-        std::string tail_segment = merged.substr(merged.length() - cut_pos);
-        double score = calculateProgressiveScore(tail_segment);
+    // 检测R2开头最多window_size长度的poly-C
+    int max_check_length = std::min(params.window_size, (int)r2_seq.length());
+    
+    // 尝试不同的cut位置（从R2开头开始）
+    for (int cut_pos = 1; cut_pos <= max_check_length; cut_pos++) {
+            // 首先检查C含量是否达标
+        std::string candidate_region = r2_seq.substr(0, cut_pos);
+        int c_count = 0;
+        for (char base : candidate_region) {
+            if (base == 'C' || base == 'c') c_count++;
+        }
+        double c_ratio = (double)c_count / cut_pos;
+        
+        // C含量必须≥80%才考虑
+        if (c_ratio < 0.8) continue;  // ← 添加这个检查
+        // ... 剩余逻辑
+        // 分析R2开头cut_pos长度的区域
+        double score = calculateProgressiveScore(r2_seq, 0, cut_pos);
         
         if (score > best_score) {
             best_score = score;
@@ -79,17 +72,46 @@ TrimResult SmartTrimmer::findOptimalTrimPositions(
         }
     }
     
-    // Step 3: Apply cutoff threshold (fixed at 0)
-    if (best_score > 0.0) {
-        // Map back to original R1/R2 positions
-        auto positions = mapToOriginalPositions(best_cut_pos, r1_tail.length(), r2_head.length());
-        result.r1_trim_pos = positions.first;
-        result.r2_trim_pos = positions.second;
+    // 应用阈值检查
+    if (best_score > 0.0 && best_cut_pos > 0) {
+        result.r1_trim_pos = 0;  // 不trim R1
+        result.r2_trim_pos = best_cut_pos;  // 从R2开头trim
         result.final_score = best_score;
         result.is_valid = true;
     }
     
     return result;
+}
+
+// 保留legacy函数以防需要
+double SmartTrimmer::calculateProgressiveScore(const std::string& merged_seq) {
+    return calculateProgressiveScore(merged_seq, 0, merged_seq.length());
+}
+
+std::pair<int, int> SmartTrimmer::mapToOriginalPositions(int merge_pos, int r1_len, int r2_len) {
+    // Legacy function - 保持兼容性
+    return std::make_pair(0, merge_pos);
+}
+
+TrimResult SmartTrimmer::findOptimalTrimPositions_Window(
+    const std::string& r1_seq, 
+    const std::string& r2_seq
+) {
+    // 这个函数现在和主函数逻辑相同，因为我们总是分析R2开头
+    return findOptimalTrimPositions(r1_seq, r2_seq);
+}
+
+std::pair<int, int> SmartTrimmer::mapMergedPositionToOriginal(
+    int cut_length_in_r2, 
+    const MergeResult& merge_result,
+    int original_r1_length,
+    int original_r2_length
+) {
+    // 简化：直接返回R2的trim位置
+    int r1_trim = 0;
+    int r2_trim = std::min(cut_length_in_r2, original_r2_length);
+    
+    return std::make_pair(r1_trim, r2_trim);
 }
 
 std::pair<std::string, std::string> SmartTrimmer::trimReads(
@@ -101,13 +123,10 @@ std::pair<std::string, std::string> SmartTrimmer::trimReads(
         return std::make_pair(r1_seq, r2_seq);  // No trimming
     }
     
-    // Trim R1 from the end
+    // R1保持不变
     std::string trimmed_r1 = r1_seq;
-    if (result.r1_trim_pos > 0 && result.r1_trim_pos < r1_seq.length()) {
-        trimmed_r1 = r1_seq.substr(0, r1_seq.length() - result.r1_trim_pos);
-    }
     
-    // Trim R2 from the start
+    // 从R2开头trim指定长度
     std::string trimmed_r2 = r2_seq;
     if (result.r2_trim_pos > 0 && result.r2_trim_pos < r2_seq.length()) {
         trimmed_r2 = r2_seq.substr(result.r2_trim_pos);
@@ -119,8 +138,8 @@ std::pair<std::string, std::string> SmartTrimmer::trimReads(
 std::vector<TrimParams> SmartTrimmer::generateParameterMatrix() {
     std::vector<TrimParams> param_list;
     
-    // Test different window sizes
-    std::vector<int> window_sizes = {20, 23, 25, 30};
+    // Test different window sizes for R2 head analysis
+    std::vector<int> window_sizes = {15, 20, 25, 30};
     
     // Test different penalty scores
     std::vector<double> penalty_scores = {-2.0, -3.0, -4.0, -5.0};
@@ -138,24 +157,25 @@ std::vector<TrimParams> SmartTrimmer::generateParameterMatrix() {
         }
     }
     
-    // Generate different weight decay functions
+    // Generate different weight decay functions for R2 head analysis
     for (int ws : window_sizes) {
-        // Exponential decay
+        // Exponential decay (强调开头)
         TrimParams exp_params(ws, 0.0);
         for (int i = 0; i < ws; i++) {
-            exp_params.position_weights[i] = std::exp(2.0 * i / (ws - 1));
+            // 越靠近开头权重越大
+            exp_params.position_weights[i] = std::exp(2.0 * (ws - 1 - i) / (ws - 1));
         }
         param_list.push_back(exp_params);
         
-        // Quadratic decay
+        // Quadratic decay (强调开头)
         TrimParams quad_params(ws, 0.0);
         for (int i = 0; i < ws; i++) {
-            double x = (double)i / (ws - 1);
+            double x = (double)(ws - 1 - i) / (ws - 1);  // 反向
             quad_params.position_weights[i] = 1.0 + 2.0 * x * x;
         }
         param_list.push_back(quad_params);
     }
     
-    std::cout << "Generated " << param_list.size() << " parameter configurations for testing." << std::endl;
+    std::cout << "Generated " << param_list.size() << " parameter configurations for R2 head poly-C analysis." << std::endl;
     return param_list;
 }
