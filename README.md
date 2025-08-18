@@ -36,15 +36,22 @@ Distance Decay 原理：
 5. 精确剪切：直接对 原始 R1、R2 进行裁剪（保持 pair 结构，输出未合并的 reads）。
 6. 验证（仅 CT 版本时启用）：校验剪切区域的 C/T 比例是否接近 85%C : 15%T。
 
-## 使用方法
-目前我们使用 fastp 先做 adapter trimming，随后运行本项目的 polyC tail trimming 模块。
-
 ## Features
 - Preserves read pairing: Outputs separate R1/R2 files, not merged
 - Position-aware: Higher weights for sequence ends
 - Ratio validation: Confirms trimmed regions match expected C/T composition (for CT tailing Only, will develop)
 - R1 preservation: Saves valuable R1 data that traditional tools waste (Single Chain)
 - Fast: Theoretical Time Complexity O(n)
+
+## 评估体系
+1. Data retention & quality → read length distribution, bases retained, per-cycle quality scores
+2. Base composition → per-base %C normalization, removal of polyC k-mer bias
+3. Mapping performance → alignment rate, soft-clipped bases in BAM files
+4. Duplication rate → avoid false duplicate merges caused by hard trimming
+5. Speed & Efficiency
+
+## 使用方法
+目前我们使用 fastp 先做 adapter trimming，随后运行本项目的 polyC tail trimming 模块。
 
 ## 重要文件一览
 ？？？？
