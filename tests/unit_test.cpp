@@ -1,492 +1,572 @@
-#include "smarttrim.h"
 #include "mergeread.h"
+#include "smarttrim.h"
 #include <iostream>
-#include <cassert>
-#include <vector>
-#include <chrono>
 #include <fstream>
-#include <random>
-#include <algorithm>
+#include <vector>
+#include <string>
 #include <map>
+#include <iomanip>
+#include <algorithm>
+#include <sstream>
+#include <functional>
 
-class TestRunner {
-private:
-    int tests_passed = 0;
-    int tests_failed = 0;
+// FASTQ record structure
+struct FastqRecord {
+    std::string header;
+    std::string sequence;
+    std::string plus_line;
+    std::string quality;
     
-public:
-    void assert_test(bool condition, const std::string& test_name) {
-        if (condition) {
-            std::cout << "[PASS] " << test_name << std::endl;
-            tests_passed++;
-        } else {
-            std::cout << "[FAIL] " << test_name << std::endl;
-            tests_failed++;
+    bool is_valid() const {
+        return !header.empty() && !sequence.empty() && 
+               !quality.empty() && sequence.length() == quality.length();
+    }
+};
+
+// Processing statistics
+struct ProcessingStats {
+    int total_reads = 0;
+    int merged_reads = 0;
+    int trimmed_reads = 0;
+    int r1_trimmed = 0;
+    int r2_trimmed = 0;
+    int both_trimmed = 0;
+    
+    // Quality metrics
+    double avg_r1_length = 0.0;
+    double avg_r2_length = 0.0;
+    double avg_merged_length = 0.0;
+    double avg_r1_trim_length = 0.0;
+    double avg_r2_trim_length = 0.0;
+    
+    // Tail analysis - extended for CT detection
+    int r1_with_polyc = 0;
+    int r1_with_polyt = 0;
+    int r1_with_ct_tail = 0;
+    int r2_with_polyg = 0;
+    int r2_with_polya = 0;
+    int r2_with_ag_tail = 0;
+    
+    double avg_polyc_length = 0.0;
+    double avg_polyt_length = 0.0;
+    double avg_ct_tail_length = 0.0;
+    double avg_polyg_length = 0.0;
+    double avg_polya_length = 0.0;
+    double avg_ag_tail_length = 0.0;
+    
+    // Score distribution
+    std::vector<double> trim_scores;
+    std::map<std::string, int> score_ranges;
+    
+    // CT specific metrics
+    int ct_pattern_detected = 0;
+    int c_only_detected = 0;
+    int mixed_tail_detected = 0;
+    
+    void updateStats(const FastqRecord& r1, const FastqRecord& r2, 
+                    const MergeResult& merge_result, const TrimResult& trim_result) {
+        total_reads++;
+        
+        // Basic length stats
+        avg_r1_length = (avg_r1_length * (total_reads - 1) + r1.sequence.length()) / total_reads;
+        avg_r2_length = (avg_r2_length * (total_reads - 1) + r2.sequence.length()) / total_reads;
+        
+        if (merge_result.merged) {
+            merged_reads++;
+            avg_merged_length = (avg_merged_length * (merged_reads - 1) + 
+                               merge_result.sequence.length()) / merged_reads;
         }
+        
+        if (trim_result.is_valid) {
+            trimmed_reads++;
+            trim_scores.push_back(trim_result.final_score);
+            
+            if (trim_result.r1_trim_pos > 0) {
+                r1_trimmed++;
+                avg_r1_trim_length = (avg_r1_trim_length * (r1_trimmed - 1) + 
+                                    trim_result.r1_trim_pos) / r1_trimmed;
+            }
+            
+            if (trim_result.r2_trim_pos > 0) {
+                r2_trimmed++;
+                avg_r2_trim_length = (avg_r2_trim_length * (r2_trimmed - 1) + 
+                                    trim_result.r2_trim_pos) / r2_trimmed;
+            }
+            
+            if (trim_result.r1_trim_pos > 0 && trim_result.r2_trim_pos > 0) {
+                both_trimmed++;
+            }
+            
+            // Score range classification
+            int score_int = (int)trim_result.final_score;
+            if (score_int < 0) score_ranges["negative"]++;
+            else if (score_int < 10) score_ranges["0-10"]++;
+            else if (score_int < 20) score_ranges["10-20"]++;
+            else if (score_int < 50) score_ranges["20-50"]++;
+            else score_ranges["50+"]++;
+        }
+        
+        // Enhanced tail content analysis
+        analyzeTailContent(r1.sequence, r2.sequence, trim_result);
     }
     
-    void print_summary() {
-        std::cout << "\n=== Test Summary ===" << std::endl;
-        std::cout << "Passed: " << tests_passed << std::endl;
-        std::cout << "Failed: " << tests_failed << std::endl;
-        std::cout << "Total:  " << (tests_passed + tests_failed) << std::endl;
+private:
+    void analyzeTailContent(const std::string& r1_seq, const std::string& r2_seq, 
+                           const TrimResult& trim_result) {
+        // Analyze R1 tail (last 20bp or trimmed region)
+        int analyze_length = 20;
+        if (trim_result.is_valid && trim_result.r1_trim_pos > 0) {
+            analyze_length = std::min(trim_result.r1_trim_pos, 20);
+        }
         
-        if (tests_failed == 0) {
-            std::cout << "All tests PASSED! ✓" << std::endl;
-        } else {
-            std::cout << "Some tests FAILED! ✗" << std::endl;
+        if (analyze_length > 0 && r1_seq.length() >= analyze_length) {
+            std::string r1_tail = r1_seq.substr(r1_seq.length() - analyze_length);
+            
+            // Count different bases
+            int c_count = 0, t_count = 0, total_ct = 0;
+            for (char base : r1_tail) {
+                char upper_base = std::toupper(base);
+                if (upper_base == 'C') { c_count++; total_ct++; }
+                else if (upper_base == 'T') { t_count++; total_ct++; }
+                else if (upper_base == 'N') { total_ct++; } // N could be C or T
+            }
+            
+            double ct_ratio = (double)total_ct / analyze_length;
+            double c_ratio = (double)c_count / analyze_length;
+            double t_ratio = (double)t_count / analyze_length;
+            
+            // Classify tail type
+            if (ct_ratio >= 0.7) {
+                if (c_count >= 3 && t_count >= 2) {
+                    // Mixed CT tail
+                    r1_with_ct_tail++;
+                    ct_pattern_detected++;
+                    avg_ct_tail_length = (avg_ct_tail_length * (r1_with_ct_tail - 1) + 
+                                        total_ct) / r1_with_ct_tail;
+                } else if (c_ratio >= 0.7) {
+                    // Mostly C
+                    r1_with_polyc++;
+                    c_only_detected++;
+                    avg_polyc_length = (avg_polyc_length * (r1_with_polyc - 1) + 
+                                      c_count) / r1_with_polyc;
+                } else if (t_ratio >= 0.7) {
+                    // Mostly T
+                    r1_with_polyt++;
+                    avg_polyt_length = (avg_polyt_length * (r1_with_polyt - 1) + 
+                                      t_count) / r1_with_polyt;
+                }
+            } else if (ct_ratio >= 0.4) {
+                // Mixed tail with some CT content
+                mixed_tail_detected++;
+            }
+        }
+        
+        // Analyze R2 head (first 20bp or trimmed region)
+        analyze_length = 20;
+        if (trim_result.is_valid && trim_result.r2_trim_pos > 0) {
+            analyze_length = std::min(trim_result.r2_trim_pos, 20);
+        }
+        
+        if (analyze_length > 0 && r2_seq.length() >= analyze_length) {
+            std::string r2_head = r2_seq.substr(0, analyze_length);
+            
+            int g_count = 0, a_count = 0, total_ag = 0;
+            for (char base : r2_head) {
+                char upper_base = std::toupper(base);
+                if (upper_base == 'G') { g_count++; total_ag++; }
+                else if (upper_base == 'A') { a_count++; total_ag++; }
+                else if (upper_base == 'N') { total_ag++; }
+            }
+            
+            double ag_ratio = (double)total_ag / analyze_length;
+            double g_ratio = (double)g_count / analyze_length;
+            double a_ratio = (double)a_count / analyze_length;
+            
+            if (ag_ratio >= 0.7) {
+                if (g_count >= 3 && a_count >= 2) {
+                    r2_with_ag_tail++;
+                    avg_ag_tail_length = (avg_ag_tail_length * (r2_with_ag_tail - 1) + 
+                                        total_ag) / r2_with_ag_tail;
+                } else if (g_ratio >= 0.7) {
+                    r2_with_polyg++;
+                    avg_polyg_length = (avg_polyg_length * (r2_with_polyg - 1) + 
+                                      g_count) / r2_with_polyg;
+                } else if (a_ratio >= 0.7) {
+                    r2_with_polya++;
+                    avg_polya_length = (avg_polya_length * (r2_with_polya - 1) + 
+                                      a_count) / r2_with_polya;
+                }
+            }
         }
     }
 };
 
-// 数据生成器 - 模拟真实WGBS数据
-class WGBSDataGenerator {
-private:
-    std::mt19937 rng;
-    
-public:
-    WGBSDataGenerator() : rng(std::chrono::steady_clock::now().time_since_epoch().count()) {}
-    
-    struct ReadPair {
-        std::string r1_seq;
-        std::string r2_seq;
-        std::string r1_qual;
-        std::string r2_qual;
-        int true_c_tail_r1;  // 真实的C tail长度
-        int true_c_tail_r2;  // 真实的C tail长度
-        std::string description;
-    };
-    
-    // 生成带C tail的测试数据
-    std::vector<ReadPair> generateTestData(int num_pairs = 100) {
-        std::vector<ReadPair> data;
-        std::uniform_int_distribution<int> c_tail_dist(0, 20);  // C tail长度0-20
-        std::uniform_int_distribution<int> seq_len_dist(120, 150);  // 序列长度120-150
-        std::uniform_int_distribution<int> base_dist(0, 3);
-        std::string bases = "ATGC";
-        
-        for (int i = 0; i < num_pairs; i++) {
-            ReadPair pair;
-            
-            // 生成R1序列
-            int r1_len = seq_len_dist(rng);
-            int r1_c_tail = c_tail_dist(rng);
-            
-            // 生成正常序列部分
-            for (int j = 0; j < r1_len - r1_c_tail; j++) {
-                pair.r1_seq += bases[base_dist(rng)];
-            }
-            // 添加C tail
-            for (int j = 0; j < r1_c_tail; j++) {
-                pair.r1_seq += 'C';
-            }
-            pair.true_c_tail_r1 = r1_c_tail;
-            
-            // 生成R2序列
-            int r2_len = seq_len_dist(rng);
-            int r2_c_head = c_tail_dist(rng);  // R2的C在开头
-            
-            // 添加C head
-            for (int j = 0; j < r2_c_head; j++) {
-                pair.r2_seq += 'C';
-            }
-            // 添加正常序列部分
-            for (int j = 0; j < r2_len - r2_c_head; j++) {
-                pair.r2_seq += bases[base_dist(rng)];
-            }
-            pair.true_c_tail_r2 = r2_c_head;
-            
-            // 生成质量分数（简单模拟）
-            pair.r1_qual = std::string(pair.r1_seq.length(), 'I');  // 高质量
-            pair.r2_qual = std::string(pair.r2_seq.length(), 'I');
-            
-            pair.description = "Simulated WGBS pair " + std::to_string(i) + 
-                              " (R1_Ctail=" + std::to_string(r1_c_tail) + 
-                              ", R2_Chead=" + std::to_string(r2_c_head) + ")";
-            
-            data.push_back(pair);
-        }
-        
-        return data;
-    }
-    
-    // 从FASTQ文件读取真实数据（如果有的话）
-    std::vector<ReadPair> loadFromFastq(const std::string& r1_file, const std::string& r2_file) {
-        std::vector<ReadPair> data;
-        std::ifstream f1(r1_file), f2(r2_file);
-        
-        if (!f1.is_open() || !f2.is_open()) {
-            std::cout << "Warning: Cannot open FASTQ files, using simulated data" << std::endl;
-            return generateTestData(100);
-        }
-        
-        std::string line1, line2;
-        ReadPair pair;
-        int line_count = 0;
-        
-        while (std::getline(f1, line1) && std::getline(f2, line2)) {
-            int pos = line_count % 4;
-            
-            if (pos == 0) {  // Header line
-                pair = ReadPair();
-                pair.description = line1;
-            } else if (pos == 1) {  // Sequence
-                pair.r1_seq = line1;
-                pair.r2_seq = line2;
-            } else if (pos == 3) {  // Quality
-                pair.r1_qual = line1;
-                pair.r2_qual = line2;
-                
-                // 估算真实C tail（简单启发式）
-                pair.true_c_tail_r1 = estimateCTail(pair.r1_seq, false);
-                pair.true_c_tail_r2 = estimateCTail(pair.r2_seq, true);
-                
-                data.push_back(pair);
-                
-                if (data.size() >= 100) break;  // 限制数量
-            }
-            line_count++;
-        }
-        
-        return data;
-    }
-    
-private:
-    int estimateCTail(const std::string& seq, bool from_head) {
-        int c_count = 0;
-        if (from_head) {
-            for (char base : seq) {
-                if (base == 'C' || base == 'c') c_count++;
-                else break;
-            }
-        } else {
-            for (int i = seq.length() - 1; i >= 0; i--) {
-                if (seq[i] == 'C' || seq[i] == 'c') c_count++;
-                else break;
-            }
-        }
-        return c_count;
-    }
+// Dataset configuration
+struct DatasetConfig {
+    std::string name;
+    std::string description;
+    std::string r1_file;
+    std::string r2_file;
+    TrimParams trim_params;
+    std::string output_prefix;
 };
 
-// 参数优化器
-class ParameterOptimizer {
+class ComprehensiveProcessor {
+private:
+    bool readFastqRecord(std::ifstream& file, FastqRecord& record) {
+        std::string line;
+        
+        if (!std::getline(file, record.header) || record.header.empty() || record.header[0] != '@') {
+            return false;
+        }
+        
+        if (!std::getline(file, record.sequence)) {
+            return false;
+        }
+        
+        if (!std::getline(file, record.plus_line) || record.plus_line.empty() || record.plus_line[0] != '+') {
+            return false;
+        }
+        
+        if (!std::getline(file, record.quality)) {
+            return false;
+        }
+        
+        return record.is_valid();
+    }
+    
+    void writeFastqRecord(std::ofstream& file, const FastqRecord& record) {
+        file << record.header << "\n"
+             << record.sequence << "\n"
+             << record.plus_line << "\n"
+             << record.quality << "\n";
+    }
+
 public:
-    struct OptimizationResult {
-        TrimParams best_params;
-        double best_score;
-        std::map<std::string, double> metrics;
-        std::vector<std::pair<TrimParams, double>> all_results;
-    };
-    
-    // 生成权重衰减函数的候选
-    std::vector<std::vector<double>> generateWeightFunctions(int window_size) {
-        std::vector<std::vector<double>> functions;
+    ProcessingStats processDataset(const DatasetConfig& config, int max_reads = 0, bool verbose = false) {
+        std::ifstream r1_file(config.r1_file);
+        std::ifstream r2_file(config.r2_file);
         
-        // 1. 线性衰减函数组
-        for (double slope = 0.5; slope <= 3.0; slope += 0.5) {
-            std::vector<double> weights(window_size);
-            for (int i = 0; i < window_size; i++) {
-                weights[i] = 1.0 + slope * i / (window_size - 1);
-            }
-            functions.push_back(weights);
+        if (!r1_file.is_open()) {
+            std::cerr << "Error: Cannot open " << config.r1_file << std::endl;
+            return ProcessingStats();
         }
         
-        // 2. 指数衰减函数组
-        for (double exp_factor = 0.5; exp_factor <= 2.0; exp_factor += 0.5) {
-            std::vector<double> weights(window_size);
-            for (int i = 0; i < window_size; i++) {
-                double x = (double)i / (window_size - 1);
-                weights[i] = std::exp(exp_factor * x);
-            }
-            functions.push_back(weights);
+        if (!r2_file.is_open()) {
+            std::cerr << "Error: Cannot open " << config.r2_file << std::endl;
+            return ProcessingStats();
         }
         
-        // 3. 二次函数组
-        for (double quad_factor = 0.5; quad_factor <= 2.0; quad_factor += 0.5) {
-            std::vector<double> weights(window_size);
-            for (int i = 0; i < window_size; i++) {
-                double x = (double)i / (window_size - 1);
-                weights[i] = 1.0 + quad_factor * x * x;
-            }
-            functions.push_back(weights);
-        }
+        // Output files
+        std::ofstream r1_out(config.output_prefix + "_R1.fastq");
+        std::ofstream r2_out(config.output_prefix + "_R2.fastq");
+        std::ofstream merged_out(config.output_prefix + "_merged.fastq");
+        std::ofstream stats_out(config.output_prefix + "_stats.txt");
         
-        // 4. 对数函数组
-        for (double log_factor = 1.0; log_factor <= 3.0; log_factor += 1.0) {
-            std::vector<double> weights(window_size);
-            for (int i = 0; i < window_size; i++) {
-                double x = (double)i / (window_size - 1);
-                weights[i] = 1.0 + log_factor * std::log(1.0 + x);
-            }
-            functions.push_back(weights);
-        }
+        SmartTrimmer trimmer(config.trim_params);
+        ReadMerger merger(10, 3, 0.3);
+        ProcessingStats stats;
         
-        return functions;
-    }
-    
-    // 评估trimming结果的准确性
-    double evaluateTrimAccuracy(const std::vector<WGBSDataGenerator::ReadPair>& test_data,
-                               const TrimParams& params) {
-        SmartTrimmer trimmer(params);
+        FastqRecord r1_record, r2_record;
+        int processed = 0;
         
-        double total_score = 0.0;
-        int valid_cases = 0;
+        std::cout << "\nProcessing " << config.description << "..." << std::endl;
+        std::cout << "Files: " << config.r1_file << " + " << config.r2_file << std::endl;
+        std::cout << "Config: " << config.trim_params.target_bases 
+                  << " (C:" << config.trim_params.c_score 
+                  << ", T:" << config.trim_params.t_score << ")" << std::endl;
         
-        for (const auto& pair : test_data) {
-            TrimResult result = trimmer.findOptimalTrimPositions(pair.r1_seq, pair.r2_seq);
+        while (readFastqRecord(r1_file, r1_record) && readFastqRecord(r2_file, r2_record)) {
+            processed++;
             
-            if (result.is_valid) {
-                // 计算准确性分数
-                double r1_accuracy = 1.0 - std::abs(result.r1_trim_pos - pair.true_c_tail_r1) / 
-                                    std::max(1.0, (double)std::max(result.r1_trim_pos, pair.true_c_tail_r1));
-                double r2_accuracy = 1.0 - std::abs(result.r2_trim_pos - pair.true_c_tail_r2) / 
-                                    std::max(1.0, (double)std::max(result.r2_trim_pos, pair.true_c_tail_r2));
+            if (max_reads > 0 && processed > max_reads) {
+                break;
+            }
+            
+            if (verbose && processed % 1000 == 0) {
+                std::cout << "Processed " << processed << " read pairs..." << std::endl;
+            }
+            
+            // Try to merge reads
+            MergeResult merge_result = merger.mergeReads(r1_record.sequence, r2_record.sequence,
+                                                        r1_record.quality, r2_record.quality);
+            
+            // Apply trimming
+            TrimResult trim_result = trimmer.findOptimalTrimPositions(r1_record.sequence, r2_record.sequence);
+            
+            // Update statistics
+            stats.updateStats(r1_record, r2_record, merge_result, trim_result);
+            
+            // Apply trimming to sequences
+            FastqRecord trimmed_r1 = r1_record;
+            FastqRecord trimmed_r2 = r2_record;
+            
+            if (trim_result.is_valid) {
+                auto trimmed_seqs = trimmer.trimReads(r1_record.sequence, r2_record.sequence, trim_result);
                 
-                total_score += (r1_accuracy + r2_accuracy) / 2.0;
-                valid_cases++;
+                if (trim_result.r1_trim_pos > 0) {
+                    trimmed_r1.sequence = trimmed_seqs.first;
+                    trimmed_r1.quality = r1_record.quality.substr(0, trimmed_seqs.first.length());
+                }
+                
+                if (trim_result.r2_trim_pos > 0) {
+                    trimmed_r2.sequence = trimmed_seqs.second;
+                    trimmed_r2.quality = r2_record.quality.substr(trim_result.r2_trim_pos);
+                }
             }
-        }
-        
-        return valid_cases > 0 ? total_score / valid_cases : 0.0;
-    }
-    
-    // 主要的参数优化函数
-    OptimizationResult optimizeParameters(const std::vector<WGBSDataGenerator::ReadPair>& data) {
-        OptimizationResult result;
-        result.best_score = -1.0;
-        
-        std::cout << "Starting parameter optimization with " << data.size() << " test cases..." << std::endl;
-        
-        // 测试不同的窗口大小
-        std::vector<int> window_sizes = {20, 25, 30, 35};
-        
-        // 测试不同的惩罚分数
-        std::vector<double> penalty_scores = {-2.0, -3.0, -4.0, -5.0, -6.0};
-        
-        // 测试不同的初始分数
-        std::vector<double> initial_scores = {0.0, -5.0, -10.0, -15.0};
-        
-        int total_combinations = 0;
-        int tested_combinations = 0;
-        
-        for (int ws : window_sizes) {
-            auto weight_functions = generateWeightFunctions(ws);
-            total_combinations += weight_functions.size() * penalty_scores.size() * initial_scores.size();
-        }
-        
-        std::cout << "Total parameter combinations to test: " << total_combinations << std::endl;
-        
-        for (int ws : window_sizes) {
-            auto weight_functions = generateWeightFunctions(ws);
             
-            for (const auto& weights : weight_functions) {
-                for (double penalty : penalty_scores) {
-                    for (double init_score : initial_scores) {
-                        TrimParams params(ws, init_score);
-                        params.penalty_score = penalty;
-                        params.position_weights = weights;
-                        
-                        double score = evaluateTrimAccuracy(data, params);
-                        result.all_results.push_back({params, score});
-                        
-                        if (score > result.best_score) {
-                            result.best_score = score;
-                            result.best_params = params;
-                        }
-                        
-                        tested_combinations++;
-                        if (tested_combinations % 50 == 0) {
-                            std::cout << "Progress: " << tested_combinations << "/" << total_combinations 
-                                     << " (" << (100.0 * tested_combinations / total_combinations) << "%)" 
-                                     << " Best score so far: " << result.best_score << std::endl;
-                        }
-                    }
+            // Write output
+            writeFastqRecord(r1_out, trimmed_r1);
+            writeFastqRecord(r2_out, trimmed_r2);
+            
+            if (merge_result.merged) {
+                FastqRecord merged_record;
+                merged_record.header = r1_record.header;
+                merged_record.sequence = merge_result.sequence;
+                merged_record.plus_line = "+";
+                merged_record.quality = merge_result.quality.empty() ? 
+                    std::string(merge_result.sequence.length(), 'I') : merge_result.quality;
+                writeFastqRecord(merged_out, merged_record);
+            }
+            
+            // Detailed logging for first few reads
+            if (verbose && processed <= 3) {
+                std::cout << "\n--- Read " << processed << " (" << config.name << ") ---" << std::endl;
+                std::cout << "R1: " << r1_record.sequence << std::endl;
+                std::cout << "R2: " << r2_record.sequence << std::endl;
+                
+                if (merge_result.merged) {
+                    std::cout << "Merged: " << merge_result.sequence << std::endl;
+                }
+                
+                if (trim_result.is_valid) {
+                    std::cout << "Trim: R1[" << trim_result.r1_trim_pos << "], R2[" 
+                              << trim_result.r2_trim_pos << "] (score: " << trim_result.score_detail << ")" << std::endl;
+                    std::cout << "After trim - R1: " << trimmed_r1.sequence << std::endl;
+                    std::cout << "After trim - R2: " << trimmed_r2.sequence << std::endl;
                 }
             }
         }
         
-        // 计算统计指标
-        result.metrics["total_combinations"] = total_combinations;
-        result.metrics["best_accuracy"] = result.best_score;
+        r1_file.close();
+        r2_file.close();
+        r1_out.close();
+        r2_out.close();
+        merged_out.close();
         
-        return result;
+        // Write statistics
+        writeStatistics(stats_out, stats, config);
+        stats_out.close();
+        
+        std::cout << "Completed: " << processed << " read pairs processed." << std::endl;
+        return stats;
+    }
+    
+    void writeStatistics(std::ofstream& file, const ProcessingStats& stats, const DatasetConfig& config) {
+        file << "CT Tail Trimming Statistics - " << config.description << "\n";
+        file << "=================================================\n\n";
+        
+        file << "Dataset:\n";
+        file << "  Name: " << config.name << "\n";
+        file << "  R1 file: " << config.r1_file << "\n";
+        file << "  R2 file: " << config.r2_file << "\n\n";
+        
+        file << "Parameters:\n";
+        file << "  Target bases: " << config.trim_params.target_bases << "\n";
+        file << "  Window size: " << config.trim_params.window_size << "\n";
+        file << "  C score: " << config.trim_params.c_score << "\n";
+        file << "  T score: " << config.trim_params.t_score << "\n";
+        file << "  A score: " << config.trim_params.a_score << "\n";
+        file << "  G score: " << config.trim_params.g_score << "\n";
+        file << "  N score: " << config.trim_params.n_score << "\n";
+        file << "  Initial score: " << config.trim_params.initial_score << "\n\n";
+        
+        file << "Processing Summary:\n";
+        file << "  Total read pairs: " << stats.total_reads << "\n";
+        file << "  Merged reads: " << stats.merged_reads 
+             << " (" << (double)stats.merged_reads / stats.total_reads * 100 << "%)\n";
+        file << "  Trimmed reads: " << stats.trimmed_reads 
+             << " (" << (double)stats.trimmed_reads / stats.total_reads * 100 << "%)\n";
+        file << "  R1 trimmed: " << stats.r1_trimmed 
+             << " (" << (double)stats.r1_trimmed / stats.total_reads * 100 << "%)\n";
+        file << "  R2 trimmed: " << stats.r2_trimmed 
+             << " (" << (double)stats.r2_trimmed / stats.total_reads * 100 << "%)\n";
+        file << "  Both trimmed: " << stats.both_trimmed 
+             << " (" << (double)stats.both_trimmed / stats.total_reads * 100 << "%)\n\n";
+        
+        file << "Length Statistics:\n";
+        file << "  Avg R1 length: " << std::fixed << std::setprecision(1) << stats.avg_r1_length << "\n";
+        file << "  Avg R2 length: " << stats.avg_r2_length << "\n";
+        file << "  Avg merged length: " << stats.avg_merged_length << "\n";
+        file << "  Avg R1 trim length: " << stats.avg_r1_trim_length << "\n";
+        file << "  Avg R2 trim length: " << stats.avg_r2_trim_length << "\n\n";
+        
+        file << "Tail Analysis:\n";
+        file << "  R1 with polyC: " << stats.r1_with_polyc 
+             << " (" << (double)stats.r1_with_polyc / stats.total_reads * 100 << "%)\n";
+        file << "  R1 with polyT: " << stats.r1_with_polyt 
+             << " (" << (double)stats.r1_with_polyt / stats.total_reads * 100 << "%)\n";
+        file << "  R1 with CT tail: " << stats.r1_with_ct_tail 
+             << " (" << (double)stats.r1_with_ct_tail / stats.total_reads * 100 << "%)\n";
+        file << "  R2 with polyG: " << stats.r2_with_polyg 
+             << " (" << (double)stats.r2_with_polyg / stats.total_reads * 100 << "%)\n";
+        file << "  R2 with polyA: " << stats.r2_with_polya 
+             << " (" << (double)stats.r2_with_polya / stats.total_reads * 100 << "%)\n";
+        file << "  R2 with AG head: " << stats.r2_with_ag_tail 
+             << " (" << (double)stats.r2_with_ag_tail / stats.total_reads * 100 << "%)\n\n";
+        
+        file << "Pattern Detection:\n";
+        file << "  CT pattern detected: " << stats.ct_pattern_detected 
+             << " (" << (double)stats.ct_pattern_detected / stats.total_reads * 100 << "%)\n";
+        file << "  C only detected: " << stats.c_only_detected 
+             << " (" << (double)stats.c_only_detected / stats.total_reads * 100 << "%)\n";
+        file << "  Mixed tail detected: " << stats.mixed_tail_detected 
+             << " (" << (double)stats.mixed_tail_detected / stats.total_reads * 100 << "%)\n\n";
+        
+        file << "Average Tail Lengths:\n";
+        file << "  PolyC length: " << stats.avg_polyc_length << "\n";
+        file << "  PolyT length: " << stats.avg_polyt_length << "\n";
+        file << "  CT tail length: " << stats.avg_ct_tail_length << "\n";
+        file << "  PolyG length: " << stats.avg_polyg_length << "\n";
+        file << "  PolyA length: " << stats.avg_polya_length << "\n";
+        file << "  AG head length: " << stats.avg_ag_tail_length << "\n\n";
+        
+        file << "Score Distribution:\n";
+        for (const auto& range : stats.score_ranges) {
+            file << "  " << range.first << ": " << range.second 
+                 << " (" << (double)range.second / stats.total_reads * 100 << "%)\n";
+        }
+    }
+
+    void printComparison(const std::vector<std::pair<std::string, ProcessingStats>>& all_stats) {
+        std::cout << "\n" << std::string(100, '=') << std::endl;
+        std::cout << "COMPREHENSIVE COMPARISON SUMMARY" << std::endl;
+        std::cout << std::string(100, '=') << std::endl;
+    
+        auto print_metric = [&](const std::string& name, std::function<double(const ProcessingStats&)> getter) {
+            std::cout << std::left << std::setw(25) << name;
+            for (const auto& stat_pair : all_stats) {
+                std::cout << std::setw(15) << std::fixed << std::setprecision(1) << getter(stat_pair.second);
+            }
+            std::cout << std::endl;
+        };
+    
+        // Print header
+        std::cout << std::left << std::setw(25) << "Metric";
+        for (const auto& stat_pair : all_stats) {
+            std::cout << std::setw(15) << stat_pair.first;
+        }
+        std::cout << std::endl;
+        std::cout << std::string(100, '-') << std::endl;
+        
+        print_metric("Trim rate (%)", [](const ProcessingStats& s) { 
+            return (double)s.trimmed_reads / s.total_reads * 100; 
+        });
+        print_metric("R1 trim rate (%)", [](const ProcessingStats& s) { 
+            return (double)s.r1_trimmed / s.total_reads * 100; 
+        });
+        print_metric("R2 trim rate (%)", [](const ProcessingStats& s) { 
+            return (double)s.r2_trimmed / s.total_reads * 100; 
+        });
+        print_metric("Both trim rate (%)", [](const ProcessingStats& s) { 
+            return (double)s.both_trimmed / s.total_reads * 100; 
+        });
+        print_metric("CT pattern (%)", [](const ProcessingStats& s) { 
+            return (double)s.ct_pattern_detected / s.total_reads * 100; 
+        });
+        print_metric("C only (%)", [](const ProcessingStats& s) { 
+            return (double)s.c_only_detected / s.total_reads * 100; 
+        });
+        print_metric("Mixed tail (%)", [](const ProcessingStats& s) { 
+            return (double)s.mixed_tail_detected / s.total_reads * 100; 
+        });
+        print_metric("Avg R1 trim len", [](const ProcessingStats& s) { 
+            return s.avg_r1_trim_length; 
+        });
+        print_metric("Avg R2 trim len", [](const ProcessingStats& s) { 
+            return s.avg_r2_trim_length; 
+        });
+        print_metric("Merge rate (%)", [](const ProcessingStats& s) { 
+            return (double)s.merged_reads / s.total_reads * 100; 
+        });
     }
 };
 
-void test_parameter_optimization() {
-    std::cout << "\n=== Testing Parameter Optimization Framework ===" << std::endl;
-    TestRunner runner;
+int main() {
+    std::cout << "Comprehensive CT Tail Analysis - Three Datasets" << std::endl;
+    std::cout << "===============================================" << std::endl;
     
-    // 生成测试数据
-    WGBSDataGenerator generator;
-    auto test_data = generator.generateTestData(50);  // 50个测试用例
-    
-    runner.assert_test(test_data.size() == 50, "Should generate 50 test cases");
-    runner.assert_test(!test_data[0].r1_seq.empty(), "Generated sequences should not be empty");
-    
-    // 测试参数优化器
-    ParameterOptimizer optimizer;
-    auto weight_functions = optimizer.generateWeightFunctions(30);
-    
-    runner.assert_test(weight_functions.size() > 10, "Should generate multiple weight functions");
-    runner.assert_test(weight_functions[0].size() == 30, "Weight function should match window size");
-    
-    std::cout << "Generated " << weight_functions.size() << " different weight functions" << std::endl;
-    
-    // 快速优化测试（减少参数组合）
-    std::cout << "Running quick parameter optimization..." << std::endl;
-    auto quick_data = generator.generateTestData(20);  // 更少的数据用于快速测试
-    auto opt_result = optimizer.optimizeParameters(quick_data);
-    
-    runner.assert_test(opt_result.best_score >= 0, "Should find valid parameter combination");
-    runner.assert_test(!opt_result.all_results.empty(), "Should test multiple parameter combinations");
-    
-    std::cout << "Best accuracy achieved: " << opt_result.best_score << std::endl;
-    std::cout << "Best parameters: window=" << opt_result.best_params.window_size 
-              << ", penalty=" << opt_result.best_params.penalty_score
-              << ", init_score=" << opt_result.best_params.initial_score << std::endl;
-    
-    runner.print_summary();
-}
-
-void test_real_data_workflow() {
-    std::cout << "\n=== Testing Real Data Workflow ===" << std::endl;
-    TestRunner runner;
-    
-    WGBSDataGenerator generator;
-    
-    // 尝试加载真实数据，如果失败则使用模拟数据
-    auto data = generator.loadFromFastq("test_R1.fastq", "test_R2.fastq");
-    
-    runner.assert_test(!data.empty(), "Should load or generate test data");
-    std::cout << "Loaded " << data.size() << " read pairs for analysis" << std::endl;
-    
-    // 显示数据统计
-    int total_r1_c_tail = 0, total_r2_c_tail = 0;
-    for (const auto& pair : data) {
-        total_r1_c_tail += pair.true_c_tail_r1;
-        total_r2_c_tail += pair.true_c_tail_r2;
-    }
-    
-    double avg_r1_c_tail = (double)total_r1_c_tail / data.size();
-    double avg_r2_c_tail = (double)total_r2_c_tail / data.size();
-    
-    std::cout << "Average C tail length - R1: " << avg_r1_c_tail 
-              << ", R2: " << avg_r2_c_tail << std::endl;
-    
-    runner.assert_test(avg_r1_c_tail >= 0 && avg_r2_c_tail >= 0, "C tail statistics should be valid");
-    
-    runner.print_summary();
-}
-
-void full_parameter_optimization_benchmark() {
-    std::cout << "\n=== Full Parameter Optimization Benchmark ===" << std::endl;
-    
-    WGBSDataGenerator generator;
-    ParameterOptimizer optimizer;
-    
-    // 生成完整的测试数据集
-    auto data = generator.generateTestData(100);
-    std::cout << "Generated " << data.size() << " test cases for comprehensive optimization" << std::endl;
-    
-    // 开始计时
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    // 运行完整的参数优化
-    auto result = optimizer.optimizeParameters(data);
-    
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
-    
-    std::cout << "\n=== Optimization Results ===" << std::endl;
-    std::cout << "Time taken: " << duration.count() << " seconds" << std::endl;
-    std::cout << "Total combinations tested: " << result.all_results.size() << std::endl;
-    std::cout << "Best accuracy: " << result.best_score * 100 << "%" << std::endl;
-    
-    std::cout << "\nBest Parameters:" << std::endl;
-    std::cout << "  Window size: " << result.best_params.window_size << std::endl;
-    std::cout << "  C score: " << result.best_params.c_score << std::endl;
-    std::cout << "  Penalty score: " << result.best_params.penalty_score << std::endl;
-    std::cout << "  Initial score: " << result.best_params.initial_score << std::endl;
-    
-    std::cout << "\nWeight function (first 10 positions):" << std::endl;
-    for (int i = 0; i < std::min(10, (int)result.best_params.position_weights.size()); i++) {
-        std::cout << "  Position " << i << ": " << result.best_params.position_weights[i] << std::endl;
-    }
-    
-    // 保存结果到文件
-    std::ofstream outfile("optimization_results.txt");
-    if (outfile.is_open()) {
-        outfile << "Best Parameters Found:\n";
-        outfile << "Window size: " << result.best_params.window_size << "\n";
-        outfile << "C score: " << result.best_params.c_score << "\n"; 
-        outfile << "Penalty score: " << result.best_params.penalty_score << "\n";
-        outfile << "Initial score: " << result.best_params.initial_score << "\n";
-        outfile << "Accuracy: " << result.best_score << "\n\n";
-        
-        outfile << "All Results (sorted by accuracy):\n";
-        std::sort(result.all_results.begin(), result.all_results.end(),
-                 [](const std::pair<TrimParams, double>& a, const std::pair<TrimParams, double>& b) { return a.second > b.second; });
-        
-        for (int i = 0; i < std::min(20, (int)result.all_results.size()); i++) {
-            const auto& params = result.all_results[i].first;
-            double score = result.all_results[i].second;
-            outfile << "Rank " << (i+1) << ": Accuracy=" << score 
-                   << ", Window=" << params.window_size
-                   << ", Penalty=" << params.penalty_score
-                   << ", InitScore=" << params.initial_score << "\n";
+    // Configure datasets
+    std::vector<DatasetConfig> datasets = {
+        {
+            "tumor", 
+            "Tumor CT Data", 
+            "tumor_R1.fastq", 
+            "tumor_R2.fastq",
+            TrimParams::createCTConfig(25),
+            "tumor_trimmed"
+        },
+        {
+            "normal", 
+            "Normal CT Data", 
+            "normal_R1.fastq", 
+            "normal_R2.fastq",
+            TrimParams::createCTConfig(25),
+            "normal_trimmed"
+        },
+        {
+            "abclonal", 
+            "ABclonal PolyC Data", 
+            "ABclonal_polyC_2407_R1.fastq", 
+            "ABclonal_polyC_2407_R2.fastq",
+            TrimParams::createPolyCConfig(25),
+            "abclonal_trimmed"
         }
-        outfile.close();
-        std::cout << "Results saved to optimization_results.txt" << std::endl;
-    }
-}
-
-// 基础功能测试（保留原有的）
-void test_basic_functionality() {
-    std::cout << "\n=== Testing Basic SmartTrim Functionality ===" << std::endl;
-    TestRunner runner;
+    };
     
-    TrimParams params(30, 0.0);
-    SmartTrimmer trimmer(params);
+    // Adjust CT parameters for tumor and normal
+    datasets[0].trim_params.t_score = 8.0;  // Tumor: T = 80% of C
+    datasets[0].trim_params.consecutive_decay_rate = 1.5;
     
-    // Test case: R2 with poly-C head
-    std::string r1 = "ATCGATCGATCGATCGATCGATCGATCGATCG";
-    std::string r2 = "CCCCCATCGATCGATCGATCGATCGATCGATCG";
+    datasets[1].trim_params.t_score = 8.0;  // Normal: T = 80% of C
+    datasets[1].trim_params.consecutive_decay_rate = 1.5;
     
-    TrimResult result = trimmer.findOptimalTrimPositions(r1, r2);
+    ComprehensiveProcessor processor;
+    std::vector<std::pair<std::string, ProcessingStats>> all_results;
     
-    runner.assert_test(result.is_valid, "Should detect poly-C tail");
-    runner.assert_test(result.final_score > 0, "Score should be positive for poly-C");
-    
-    runner.print_summary();
-}
-
-int main(int argc, char* argv[]) {
-    std::cout << "SmartTrim Comprehensive Testing & Parameter Optimization" << std::endl;
-    std::cout << "=======================================================" << std::endl;
-    
-    bool run_full_optimization = false;
-    if (argc > 1) {
-        std::string arg = argv[1];
-        if (arg == "--full-optimization" || arg == "--optimize") {
-            run_full_optimization = true;
-        }
-    }
-    
-    if (run_full_optimization) {
-        std::cout << "Running FULL parameter optimization (this may take several minutes)..." << std::endl;
-        full_parameter_optimization_benchmark();
-    } else {
-        // Run standard tests
-        test_basic_functionality();
-        test_parameter_optimization();
-        test_real_data_workflow();
+    for (const auto& dataset : datasets) {
+        std::cout << "\n" << std::string(80, '-') << std::endl;
+        std::cout << "PROCESSING: " << dataset.description << std::endl;
+        std::cout << std::string(80, '-') << std::endl;
         
-        std::cout << "\n=== Quick Start Guide ===" << std::endl;
-        std::cout << "To run full parameter optimization: ./unit_test --optimize" << std::endl;
-        std::cout << "To use real FASTQ data: place test_R1.fastq and test_R2.fastq in current directory" << std::endl;
+        // Process first 3000 reads for comparison
+        ProcessingStats stats = processor.processDataset(dataset, 3000, (dataset.name == "tumor"));
+        
+        all_results.push_back({dataset.name, stats});
+        
+        std::cout << "\nQuick Summary for " << dataset.description << ":" << std::endl;
+        std::cout << "  Total reads: " << stats.total_reads << std::endl;
+        std::cout << "  Trim rate: " << std::fixed << std::setprecision(1) 
+                  << (double)stats.trimmed_reads / stats.total_reads * 100 << "%" << std::endl;
+        std::cout << "  CT patterns: " << stats.ct_pattern_detected 
+                  << " (" << (double)stats.ct_pattern_detected / stats.total_reads * 100 << "%)" << std::endl;
+        std::cout << "  C only: " << stats.c_only_detected 
+                  << " (" << (double)stats.c_only_detected / stats.total_reads * 100 << "%)" << std::endl;
+        std::cout << "  Both trimmed: " << stats.both_trimmed 
+                  << " (" << (double)stats.both_trimmed / stats.total_reads * 100 << "%)" << std::endl;
     }
+    
+    // Print comprehensive comparison
+    processor.printComparison(all_results);
+    
+    std::cout << "\n" << std::string(100, '=') << std::endl;
+    std::cout << "ANALYSIS COMPLETE" << std::endl;
+    std::cout << "Output files generated:" << std::endl;
+    std::cout << "  tumor_trimmed_[R1|R2|merged|stats].*" << std::endl;
+    std::cout << "  normal_trimmed_[R1|R2|merged|stats].*" << std::endl;
+    std::cout << "  abclonal_trimmed_[R1|R2|merged|stats].*" << std::endl;
+    std::cout << "Check individual stats files for detailed analysis." << std::endl;
+    std::cout << std::string(100, '=') << std::endl;
     
     return 0;
 }
