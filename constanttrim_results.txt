@@ -1,0 +1,38 @@
+Filtered 5 contaminated reads from tumor_R1.fastq
+Filtered 11 contaminated reads from tumor_R2.fastq
+=== Analysis for TUMOR ===
+TAIL Optimal Trim Lengths:
+Quality*Retention (both scaled) - Recommended: 13bp
+Quality^2*Retention (both scaled) - Prefer Quality: 16bp
+Retention^2*Quality (both scaled) - Prefer Retention: 10bp
+HEAD Optimal Trim Lengths:
+Quality*Retention (both scaled) - Recommended: 10bp
+Quality^2*Retention (both scaled) - Prefer Quality: 12bp
+Retention^2*Quality (both scaled) - Prefer Retention: 9bp
+=== Overall Best (Quality*Retention both scaled) for TUMOR ===
+R1 Tail: 10bp (Retention: 0.9333, Quality: 0.847877)
+HEAD Optimal Trim Lengths:
+Quality*Retention (both scaled) - Recommended: 10bp
+Quality^2*Retention (both scaled) - Prefer Quality: 12bp
+Retention^2*Quality (both scaled) - Prefer Retention: 9bp
+R2 Head: 10bp (Retention: 0.9333, Quality: 0.847877)
+Generating plots for dataset: tumor
+Filtered 4 contaminated reads from normal_R1.fastq
+Filtered 4 contaminated reads from normal_R2.fastq
+=== Analysis for NORMAL ===
+TAIL Optimal Trim Lengths:
+Quality*Retention (both scaled) - Recommended: 13bp
+Quality^2*Retention (both scaled) - Prefer Quality: 16bp
+Retention^2*Quality (both scaled) - Prefer Retention: 10bp
+HEAD Optimal Trim Lengths:
+Quality*Retention (both scaled) - Recommended: 10bp
+Quality^2*Retention (both scaled) - Prefer Quality: 11bp
+Retention^2*Quality (both scaled) - Prefer Retention: 9bp
+=== Overall Best (Quality*Retention both scaled) for NORMAL ===
+R1 Tail: 10bp (Retention: 0.9333, Quality: 0.861715)
+HEAD Optimal Trim Lengths:
+Quality*Retention (both scaled) - Recommended: 10bp
+Quality^2*Retention (both scaled) - Prefer Quality: 11bp
+Retention^2*Quality (both scaled) - Prefer Retention: 9bp
+R2 Head: 10bp (Retention: 0.9333, Quality: 0.861715)
+Generating plots for dataset: normal
