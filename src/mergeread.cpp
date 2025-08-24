@@ -1,388 +1,333 @@
-#include "smarttrim.h"
 #include "mergeread.h"
 #include <algorithm>
-#include <iostream>
 #include <cmath>
+#include <iostream>
 
-// 修正的动态递进检测算法 - 只分析merge后的C tail
-TrimResult SmartTrimmer::findOptimalTrimPositions(
-    const std::string& r1_seq, 
-    const std::string& r2_seq
-) {
-    TrimResult result;
+// Helper function to get reverse complement
+std::string ReadMerger::reverseComplement(const std::string& seq) {
+    std::string rc;
+    rc.reserve(seq.length());
+    
+    for (int i = seq.length() - 1; i >= 0; i--) {
+        rc += getComplementBase(seq[i]);
+    }
+    
+    return rc;
+}
+
+bool ReadMerger::isValidBase(char base) {
+    char upper_base = std::toupper(base);
+    return (upper_base == 'A' || upper_base == 'T' || 
+            upper_base == 'G' || upper_base == 'C' || upper_base == 'N');
+}
+
+char ReadMerger::getComplementBase(char base) {
+    switch (std::toupper(base)) {
+        case 'A': return 'T';
+        case 'T': return 'A';
+        case 'G': return 'C';
+        case 'C': return 'G';
+        case 'N': return 'N';  // N remains N, but could be context-dependent
+        default: return 'N';
+    }
+}
+
+// Modified overlap detection for PolyC tail processing with relaxed requirements
+// R2 starts with GG tail (complement of polyC tail)
+// Logic: complement R2 first, then merge with R1
+// Result: R1 head at 3' end, R2 head at 5' end
+OverlapResult ReadMerger::detectOverlap(const std::string& r1_seq, 
+                                       const std::string& r2_seq,
+                                       const std::string& r1_qual,
+                                       const std::string& r2_qual) {
+    OverlapResult result;
     
     if (r1_seq.empty() || r2_seq.empty()) {
         return result;
     }
     
-    // 先尝试merge
-    ReadMerger merger(10, 3, 0.3);
-    MergeResult merge_result = merger.mergeReads(r1_seq, r2_seq);
-    
-    if (merge_result.merged) {
-        // Merge成功，分析merged序列尾部的polyC tail
-        return analyzeMergedSequence(merge_result, r1_seq, r2_seq);
-    } else {
-        // Merge失败，直接分析R2头部的polyG tail (作为fallback)
-        return analyzeR2PolyGTail(r2_seq);
+    // For PolyC tail processing:
+    // 1. R2 starts with GG tail (complement of polyC tail)
+    // 2. Get reverse complement of R2
+    std::string r2_rc = reverseComplement(r2_seq);
+    std::string r2_qual_rev = r2_qual;
+    if (!r2_qual_rev.empty()) {
+        std::reverse(r2_qual_rev.begin(), r2_qual_rev.end());
     }
-}
-
-TrimResult SmartTrimmer::analyzeMergedSequence(
-    const MergeResult& merge_result,
-    const std::string& original_r1_seq,
-    const std::string& original_r2_seq
-) {
-    TrimResult result;
-    std::string merged_seq = merge_result.sequence;
     
-    // 从merged序列末尾开始动态检测target tail (支持C, CT, CG等)
-    double current_score = params.initial_score;
-    int best_cutoff = 0;
-    double best_cutoff_score = params.initial_score;
-    double cutoff_next_score = 0.0;
-    bool has_next_score = false;
-    bool in_death_mode = false;
-    int death_mode_start = -1;
-    int consecutive_good_bases = 0;
-    int consecutive_target_count = 0;  // 连续目标碱基计数
+    // 3. Now we need to find overlap between R1 and R2_RC
+    // The expected structure after merge should be: R2_head(5') + overlap + R1_head(3')
+    // This means we're looking for R1's 3' end overlapping with R2_RC's 5' end
     
-    int max_check_length = std::min(params.window_size, (int)merged_seq.length());
+    int r1_len = r1_seq.length();
+    int r2_rc_len = r2_rc.length();
     
-    for (int i = 0; i < max_check_length; i++) {
-        int pos = merged_seq.length() - 1 - i; // 从末尾开始
-        char base = std::toupper(merged_seq[pos]);
+    int best_offset = -1;
+    int best_overlap_len = 0;
+    int best_diff_count = 999999;
+    
+    // Look for overlap: R1's tail overlapping with R2_RC's head
+    for (int r1_start = 0; r1_start <= r1_len - min_overlap_len; r1_start++) {
+        int max_possible_overlap = std::min(r1_len - r1_start, r2_rc_len);
         
-        // 使用新的权重计算系统
-        double distance_weight = params.calculateDistanceWeight(i);
-        
-        // 连续目标碱基权重计算
-        double consecutive_weight = 1.0;
-        if (params.isTargetBase(base)) {
-            consecutive_target_count++;
-            consecutive_weight = params.calculateConsecutiveWeight(consecutive_target_count);
-            consecutive_good_bases++;
-        } else {
-            consecutive_target_count = 0; // 重置连续计数
-            consecutive_good_bases = 0;
-        }
-        
-        // 最终权重 = 距离权重 × 连续权重
-        double final_weight = distance_weight * consecutive_weight;
-        
-        if (params.isTargetBase(base)) {
-            // 目标碱基加分
-            double base_score = params.getBaseScore(base);
-            current_score += base_score * final_weight;
+        for (int overlap_len = min_overlap_len; overlap_len <= max_possible_overlap; overlap_len++) {
+            // Check if R1 suffix matches R2_RC prefix
+            std::string r1_region = r1_seq.substr(r1_start, overlap_len);
+            std::string r2_region = r2_rc.substr(0, overlap_len);
             
-            // 濒死模式检查复活
-            if (in_death_mode && consecutive_good_bases >= 3) {
-                in_death_mode = false;
-                death_mode_start = -1;
-                consecutive_good_bases = 0;
-            }
-        } else {
-            // 非目标碱基扣分
-            double base_score = params.getBaseScore(base);
-            double penalty_multiplier = 1.0 + 2.0 * distance_weight; // 1.0到3.0之间
-            current_score += base_score * penalty_multiplier;
-            
-            // 记录cutoff后第一个非目标碱基的分数
-            if (best_cutoff > 0 && !has_next_score) {
-                cutoff_next_score = current_score;
-                has_next_score = true;
-            }
-            
-            // 检查是否进入濒死模式
-            if (current_score < 0.0 && !in_death_mode) {
-                in_death_mode = true;
-                death_mode_start = i;
-                consecutive_target_count = 0; // 重置连续计数，重新开始累积
-            }
-        }
-        
-        // 如果分数还是正的，更新最佳cutoff
-        if (current_score >= 0.0) {
-            best_cutoff = i + 1;
-            best_cutoff_score = current_score;
-        }
-        
-        // 濒死模式超时检查 - 如果连续5个非目标碱基就坠机
-        if (in_death_mode && (i - death_mode_start) > 5) {
-            break; // 坠机，停止检测
-        }
-    }
-    
-    if (best_cutoff > 0) {
-        // 映射到原始reads的trim位置
-        std::pair<int, int> trim_positions = mapMergedPositionToOriginal(
-            best_cutoff, merge_result, original_r1_seq, original_r2_seq
-        );
-        
-        result.r1_trim_pos = trim_positions.first;
-        result.r2_trim_pos = trim_positions.second;
-        result.final_score = best_cutoff_score;
-        
-        // 生成score详情
-        if (has_next_score) {
-            result.score_detail = std::to_string(best_cutoff_score) + " -> " + std::to_string(cutoff_next_score);
-        } else {
-            result.score_detail = std::to_string(best_cutoff_score) + " -> (no next)";
-        }
-        
-        result.is_valid = true;
-    }
-    
-    return result;
-}
-
-TrimResult SmartTrimmer::analyzeR2PolyGTail(const std::string& r2_seq) {
-    TrimResult result;
-    
-    // Fallback: 当merge失败时，分析R2头部的target tail
-    double current_score = params.initial_score;
-    int best_cutoff = 0;
-    double best_cutoff_score = params.initial_score;
-    double cutoff_next_score = 0.0;
-    bool has_next_score = false;
-    bool in_death_mode = false;
-    int death_mode_start = -1;
-    int consecutive_good_bases = 0;
-    int consecutive_target_count = 0;  // 连续目标碱基计数
-    
-    int max_check_length = std::min(params.window_size, (int)r2_seq.length());
-    
-    for (int i = 0; i < max_check_length; i++) {
-        char base = std::toupper(r2_seq[i]);
-        
-        // 距离衰减：从R2头部开始
-        double distance_weight = params.calculateDistanceWeight(i);
-        
-        // 连续目标碱基衰减
-        double consecutive_weight = 1.0;
-        if (params.isTargetBase(base)) {
-            consecutive_target_count++;
-            consecutive_weight = params.calculateConsecutiveWeight(consecutive_target_count);
-            consecutive_good_bases++;
-        } else {
-            consecutive_target_count = 0;
-            consecutive_good_bases = 0;
-        }
-        
-        double final_weight = distance_weight * consecutive_weight;
-        
-        if (params.isTargetBase(base)) {
-            double base_score = params.getBaseScore(base);
-            current_score += base_score * final_weight;
-            
-            // 濒死模式检查复活
-            if (in_death_mode && consecutive_good_bases >= 3) {
-                in_death_mode = false;
-                death_mode_start = -1;
-                consecutive_good_bases = 0;
-            }
-        } else {
-            // 非目标碱基扣分
-            double base_score = params.getBaseScore(base);
-            double penalty_multiplier = 1.0 + 2.0 * distance_weight;
-            current_score += base_score * penalty_multiplier;
-            
-            if (best_cutoff > 0 && !has_next_score) {
-                cutoff_next_score = current_score;
-                has_next_score = true;
-            }
-            
-            // 检查是否进入濒死模式
-            if (current_score < 0.0 && !in_death_mode) {
-                in_death_mode = true;
-                death_mode_start = i;
-                consecutive_target_count = 0; // 重置连续计数
-            }
-        }
-        
-        // 如果分数还是正的，更新最佳cutoff
-        if (current_score >= 0.0) {
-            best_cutoff = i + 1;
-            best_cutoff_score = current_score;
-        }
-        
-        // 濒死模式超时检查
-        if (in_death_mode && (i - death_mode_start) > 5) {
-            break; // 坠机
-        }
-    }
-    
-    if (best_cutoff > 0) {
-        result.r1_trim_pos = 0; // 不trim R1
-        result.r2_trim_pos = best_cutoff; // 从R2开头trim
-        result.final_score = best_cutoff_score;
-        
-        if (has_next_score) {
-            result.score_detail = std::to_string(best_cutoff_score) + " -> " + std::to_string(cutoff_next_score);
-        } else {
-            result.score_detail = std::to_string(best_cutoff_score) + " -> (no next)";
-        }
-        
-        result.is_valid = true;
-    }
-    
-    return result;
-}
-
-// 修正的映射函数 - 考虑生物学对应关系
-std::pair<int, int> SmartTrimmer::mapMergedPositionToOriginal(
-    int cut_length_from_end, 
-    const MergeResult& merge_result,
-    const std::string& original_r1_seq,
-    const std::string& original_r2_seq
-) {
-    std::string merged_seq = merge_result.sequence;
-    int merged_length = merged_seq.length();
-    
-    // 获取要trim的polyC region
-    std::string polyc_region = merged_seq.substr(merged_length - cut_length_from_end, cut_length_from_end);
-    
-    int r1_trim = 0;
-    int r2_trim = 0;
-    
-    // 关键：分析polyC tail的生物学来源
-    // 检查原始R1末尾的polyC含量
-    int r1_end_c_count = 0;
-    int check_length_r1 = std::min(cut_length_from_end, (int)original_r1_seq.length());
-    if (check_length_r1 > 0) {
-        std::string r1_end = original_r1_seq.substr(original_r1_seq.length() - check_length_r1);
-        for (char base : r1_end) {
-            if (std::toupper(base) == 'C' || std::toupper(base) == 'N') {
-                r1_end_c_count++;
-            }
-        }
-    }
-    
-    // 检查原始R2开头的polyG含量（对应polyC）
-    int r2_start_g_count = 0;
-    int check_length_r2 = std::min(cut_length_from_end, (int)original_r2_seq.length());
-    if (check_length_r2 > 0) {
-        std::string r2_start = original_r2_seq.substr(0, check_length_r2);
-        for (char base : r2_start) {
-            if (std::toupper(base) == 'G' || std::toupper(base) == 'N') {
-                r2_start_g_count++;
-            }
-        }
-    }
-    
-    // 生物学对应关系：
-    // 如果R1末尾有polyC且R2开头有polyG，它们在merge后都变成同一段polyC tail
-    // 我们需要同时trim它们！
-    
-    if (r1_end_c_count >= 3 && r2_start_g_count >= 3) {
-        // 两者都有明显的poly特征 - 同时trim
-        r1_trim = r1_end_c_count;  // trim R1末尾的所有C
-        r2_trim = r2_start_g_count; // trim R2开头的所有G
-    } else if (r1_end_c_count >= 3) {
-        // 只有R1有polyC - 只trim R1
-        r1_trim = r1_end_c_count;
-        r2_trim = 0;
-    } else if (r2_start_g_count >= 3) {
-        // 只有R2有polyG - 只trim R2
-        r1_trim = 0;
-        r2_trim = r2_start_g_count;
-    } else {
-        // 都没有明显特征 - 保守策略
-        // 但如果算法检测到了polyC tail，说明确实有问题
-        // 按检测到的长度分配
-        if (r1_end_c_count > 0 && r2_start_g_count > 0) {
-            r1_trim = r1_end_c_count;
-            r2_trim = r2_start_g_count;
-        } else if (r1_end_c_count > 0) {
-            r1_trim = cut_length_from_end;
-            r2_trim = 0;
-        } else {
-            r1_trim = 0;
-            r2_trim = cut_length_from_end;
-        }
-    }
-    
-    // 确保不超出原始序列长度
-    r1_trim = std::max(0, std::min(r1_trim, (int)original_r1_seq.length()));
-    r2_trim = std::max(0, std::min(r2_trim, (int)original_r2_seq.length()));
-    
-    return std::make_pair(r1_trim, r2_trim);
-}
-
-// trim函数
-std::pair<std::string, std::string> SmartTrimmer::trimReads(
-    const std::string& r1_seq,
-    const std::string& r2_seq,
-    const TrimResult& result
-) {
-    if (!result.is_valid) {
-        return std::make_pair(r1_seq, r2_seq);
-    }
-    
-    std::string trimmed_r1 = r1_seq;
-    std::string trimmed_r2 = r2_seq;
-    
-    // 从R1末尾trim
-    if (result.r1_trim_pos > 0 && result.r1_trim_pos < r1_seq.length()) {
-        trimmed_r1 = r1_seq.substr(0, r1_seq.length() - result.r1_trim_pos);
-    }
-    
-    // 从R2开头trim
-    if (result.r2_trim_pos > 0 && result.r2_trim_pos < r2_seq.length()) {
-        trimmed_r2 = r2_seq.substr(result.r2_trim_pos);
-    }
-    
-    return std::make_pair(trimmed_r1, trimmed_r2);
-}
-
-// 参数矩阵生成 - 支持CT tail和PolyC tail测试
-std::vector<TrimParams> SmartTrimmer::generateParameterMatrix() {
-    std::vector<TrimParams> param_list;
-    
-    std::vector<int> window_sizes = {15, 20, 25, 30};
-    std::vector<double> initial_scores = {0.0, -5.0, -10.0};
-    
-    // PolyC配置矩阵
-    std::vector<double> c_scores = {8.0, 10.0, 12.0, 15.0};
-    std::vector<double> penalty_scores = {-15.0, -20.0, -25.0};
-    
-    for (int ws : window_sizes) {
-        for (double c_score : c_scores) {
-            for (double penalty : penalty_scores) {
-                for (double init_score : initial_scores) {
-                    TrimParams params = TrimParams::createPolyCConfig(ws);
-                    params.c_score = c_score;
-                    params.a_score = penalty;
-                    params.g_score = penalty;
-                    params.t_score = penalty;
-                    params.initial_score = init_score;
-                    param_list.push_back(params);
+            // Count mismatches
+            int diff_count = 0;
+            for (int i = 0; i < overlap_len; i++) {
+                if (std::toupper(r1_region[i]) != std::toupper(r2_region[i])) {
+                    diff_count++;
                 }
             }
+            
+            double diff_percent = (double)diff_count / overlap_len;
+            
+            // Check if this overlap meets criteria
+            bool valid_overlap = (diff_count <= max_diff_count) && 
+                               (diff_percent <= max_diff_percent);
+            
+            if (valid_overlap && (diff_count < best_diff_count || 
+                (diff_count == best_diff_count && overlap_len > best_overlap_len))) {
+                best_offset = r1_start;  // Position in R1 where overlap starts
+                best_overlap_len = overlap_len;
+                best_diff_count = diff_count;
+            }
         }
     }
     
-    // CT tail配置矩阵
-    std::vector<double> t_scores = {6.0, 8.0, 10.0}; // T分数通常比C分数低
-    std::vector<double> ct_ratios = {0.6, 0.8, 1.0}; // T/C 比例
+    // Also check the reverse case: R2_RC extends beyond R1
+    for (int r2_start = 0; r2_start <= r2_rc_len - min_overlap_len; r2_start++) {
+        int max_possible_overlap = std::min(r2_rc_len - r2_start, r1_len);
+        
+        for (int overlap_len = min_overlap_len; overlap_len <= max_possible_overlap; overlap_len++) {
+            // Check if R1 matches R2_RC suffix starting from r2_start
+            std::string r1_region = r1_seq.substr(0, overlap_len);
+            std::string r2_region = r2_rc.substr(r2_start, overlap_len);
+            
+            int diff_count = 0;
+            for (int i = 0; i < overlap_len; i++) {
+                char r1_base = std::toupper(r1_region[i]);
+                char r2_base = std::toupper(r2_region[i]);
+                
+                // Special handling for N bases
+                if (r1_base == 'N' || r2_base == 'N') {
+                    if (!r1_qual.empty() && !r2_qual_rev.empty()) {
+                        char r1_q = r1_qual[i];
+                        char r2_q = r2_qual_rev[r2_start + i];
+                        
+                        if (r1_q < '#' || r2_q < '#') { // Phred < 3
+                            continue;
+                        }
+                    }
+                    diff_count += 0.5; // Half penalty for N
+                } else if (r1_base != r2_base) {
+                    diff_count++;
+                }
+            }
+            
+            double diff_percent = (double)diff_count / overlap_len;
+            
+            bool valid_overlap = (diff_count <= max_diff_count) && 
+                               (diff_percent <= max_diff_percent);
+            
+            if (valid_overlap && (diff_count < best_diff_count || 
+                (diff_count == best_diff_count && overlap_len > best_overlap_len))) {
+                best_offset = -r2_start - 1; // Negative to indicate R2_RC extends beyond R1
+                best_overlap_len = overlap_len;
+                best_diff_count = diff_count;
+            }
+        }
+    }
     
-    for (int ws : window_sizes) {
-        for (double c_score : c_scores) {
-            for (double t_ratio : ct_ratios) {
-                for (double penalty : penalty_scores) {
-                    for (double init_score : initial_scores) {
-                        TrimParams params = TrimParams::createCTConfig(ws);
-                        params.c_score = c_score;
-                        params.t_score = c_score * t_ratio;
-                        params.a_score = penalty;
-                        params.g_score = penalty;
-                        params.initial_score = init_score;
-                        param_list.push_back(params);
+    if (best_offset != -1 && best_overlap_len >= min_overlap_len) {
+        result.overlapped = true;
+        result.offset = best_offset;
+        result.overlap_len = best_overlap_len;
+        result.diff_count = best_diff_count;
+        result.diff_percent = (double)best_diff_count / best_overlap_len;
+    }
+    
+    return result;
+}
+
+// New function: concatenate reads when no overlap found
+MergeResult ReadMerger::concatenateReads(const std::string& r1_seq, 
+                                        const std::string& r2_seq,
+                                        const std::string& r1_qual,
+                                        const std::string& r2_qual) {
+    MergeResult result;
+    
+    // Get reverse complement of R2 for consistent orientation
+    std::string r2_rc = reverseComplement(r2_seq);
+    std::string r2_qual_rev = r2_qual;
+    if (!r2_qual_rev.empty()) {
+        std::reverse(r2_qual_rev.begin(), r2_qual_rev.end());
+    }
+    
+    // Simple concatenation: R1 + R2_RC
+    result.sequence = r1_seq + r2_rc;
+    
+    // Concatenate quality scores if available
+    if (!r1_qual.empty() && !r2_qual_rev.empty()) {
+        result.quality = r1_qual + r2_qual_rev;
+    } else if (!r1_qual.empty()) {
+        result.quality = r1_qual;
+    }
+    
+    // Set result fields
+    result.merged = true;        // Successfully processed
+    result.overlapped = false;   // No overlap found, just concatenated
+    result.r1_bases = r1_seq.length();
+    result.r2_bases = r2_rc.length();
+    result.r1_start_in_merged = 0;
+    result.r2_end_in_merged = r1_seq.length() + r2_rc.length();
+    result.overlap_length = 0;   // No overlap
+    result.merge_offset = r1_seq.length();  // R2 starts right after R1
+    
+    return result;
+}
+
+// Main merge function - sequence only
+MergeResult ReadMerger::mergeReads(const std::string& r1_seq, const std::string& r2_seq) {
+    return mergeReads(r1_seq, r2_seq, "", "");
+}
+
+// Modified merge function for PolyC tail processing with concatenation fallback
+// Result structure: R2_head(5') + overlap + R1_head(3') OR R1 + R2_RC (concatenated)
+MergeResult ReadMerger::mergeReads(const std::string& r1_seq, const std::string& r2_seq,
+                                  const std::string& r1_qual, const std::string& r2_qual) {
+    MergeResult result;
+    
+    // First try to find overlap
+    OverlapResult overlap = detectOverlap(r1_seq, r2_seq, r1_qual, r2_qual);
+    
+    if (!overlap.overlapped) {
+        // No overlap found - check if concatenation is enabled
+        if (enable_concatenation) {
+            return concatenateReads(r1_seq, r2_seq, r1_qual, r2_qual);
+        } else {
+            return result; // Return empty result if concatenation disabled
+        }
+    }
+    
+    // Overlap found - proceed with merging
+    result.overlapped = true;
+    
+    // Prepare reverse complement of R2 (since R2 has GG tail at start)
+    std::string r2_rc = reverseComplement(r2_seq);
+    std::string r2_qual_rev = r2_qual;
+    if (!r2_qual_rev.empty()) {
+        std::reverse(r2_qual_rev.begin(), r2_qual_rev.end());
+    }
+    
+    std::string merged_seq;
+    std::string merged_qual;
+    
+    if (overlap.offset >= 0) {
+        // Case 1: Standard overlap - R1 suffix overlaps with R2_RC prefix
+        if (overlap.offset > 0) {
+            merged_seq = r1_seq.substr(0, overlap.offset);
+            if (!r1_qual.empty()) {
+                merged_qual = r1_qual.substr(0, overlap.offset);
+            }
+        }
+        
+        for (int i = 0; i < overlap.overlap_len; i++) {
+            char r1_base = r1_seq[overlap.offset + i];
+            char r2_base = r2_rc[i];
+            
+            if (!r1_qual.empty() && !r2_qual_rev.empty()) {
+                char r1_q = r1_qual[overlap.offset + i];
+                char r2_q = r2_qual_rev[i];
+                
+                if (std::toupper(r1_base) == 'N' && std::toupper(r2_base) != 'N') {
+                    merged_seq += r2_base;
+                    merged_qual += r2_q;
+                } else if (std::toupper(r2_base) == 'N' && std::toupper(r1_base) != 'N') {
+                    merged_seq += r1_base;
+                    merged_qual += r1_q;
+                } else if (std::toupper(r1_base) == 'N' && std::toupper(r2_base) == 'N') {
+                    if (i >= overlap.overlap_len - 5) {
+                        merged_seq += 'C'; // Assume N is miscalled C in polyC region
+                        merged_qual += std::max(r1_q, r2_q);
+                    } else {
+                        merged_seq += 'N';
+                        merged_qual += std::max(r1_q, r2_q);
+                    }
+                } else {
+                    if (r1_q >= r2_q) {
+                        merged_seq += r1_base;
+                        merged_qual += r1_q;
+                    } else {
+                        merged_seq += r2_base;
+                        merged_qual += r2_q;
                     }
                 }
+            } else {
+                if (std::toupper(r1_base) == 'N' && std::toupper(r2_base) != 'N') {
+                    merged_seq += r2_base;
+                } else if (std::toupper(r2_base) == 'N' && std::toupper(r1_base) != 'N') {
+                    merged_seq += r1_base;
+                } else {
+                    merged_seq += r1_base;
+                }
+                if (!r1_qual.empty()) {
+                    merged_qual += r1_qual[i];
+                }
             }
         }
+        
+        if (overlap.overlap_len < (int)r1_seq.length()) {
+            merged_seq += r1_seq.substr(overlap.overlap_len);
+            if (!r1_qual.empty()) {
+                merged_qual += r1_qual.substr(overlap.overlap_len);
+            }
+        }
+        
+        int r2_remaining_start = overlap.offset + overlap.overlap_len;
+        if (r2_remaining_start < (int)r2_rc.length()) {
+            merged_seq += r2_rc.substr(r2_remaining_start);
+            if (!r2_qual_rev.empty()) {
+                merged_qual += r2_qual_rev.substr(r2_remaining_start);
+            }
+        }
+        
+        result.r1_bases = r1_seq.length();
+        result.r2_bases = r2_rc.length() - overlap.overlap_len;
+        
+        result.r1_start_in_merged = 0;
+        result.r2_end_in_merged = overlap.offset + overlap.overlap_len + (r2_rc.length() - overlap.overlap_len);
+        result.overlap_length = overlap.overlap_len;
+        result.merge_offset = overlap.offset;
     }
     
-    return param_list;
+    result.merged = true;
+    result.sequence = merged_seq;
+    result.quality = merged_qual;
+    
+    return result;
+}
+
+OverlapResult ReadMerger::analyzeOverlap(const std::string& r1_seq, const std::string& r2_seq) {
+    return detectOverlap(r1_seq, r2_seq);
+}
+
+std::string ReadMerger::getSubsequence(const std::string& seq, int start, int length) {
+    if (start < 0 || start >= (int)seq.length()) {
+        return "";
+    }
+    
+    int actual_length = std::min(length, (int)seq.length() - start);
+    return seq.substr(start, actual_length);
+}
+
+bool ReadMerger::hasValidOverlap(const OverlapResult& result, int min_len, 
+                                int max_diff, double max_pct) {
+    return result.overlapped && 
+           result.overlap_len >= min_len &&
+           result.diff_count <= max_diff &&
+           result.diff_percent <= max_pct;
 }

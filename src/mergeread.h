@@ -17,19 +17,20 @@ struct OverlapResult {
 };
 
 struct MergeResult {
-    bool merged;           // Whether reads were successfully merged
-    std::string sequence;  // Merged sequence (R2_head(5') + overlap + R1_head(3'))
-    std::string quality;   // Merged quality string (if provided)
+    bool merged;           // Whether reads were successfully processed (merged or concatenated)
+    bool overlapped;       // Whether actual overlap was found (true=merged, false=concatenated)
+    std::string sequence;  // Final sequence (merged or concatenated)
+    std::string quality;   // Final quality string (if provided)
     int r1_bases;         // Number of bases contributed from read1
     int r2_bases;         // Number of bases contributed from read2 (after reverse complement)
     
-    // 新增：对齐信息 - 用于正确的trim位置映射
+    // 对齐信息 - 用于正确的trim位置映射
     int r1_start_in_merged;  // R1在merged序列中的起始位置
     int r2_end_in_merged;    // R2在merged序列中的结束位置  
-    int overlap_length;      // overlap的长度
+    int overlap_length;      // overlap的长度 (0 if concatenated)
     int merge_offset;        // merge偏移：R1头到R2原本尾巴新位置的距离（可正可负）
     
-    MergeResult() : merged(false), r1_bases(0), r2_bases(0), 
+    MergeResult() : merged(false), overlapped(false), r1_bases(0), r2_bases(0), 
                    r1_start_in_merged(-1), r2_end_in_merged(-1), 
                    overlap_length(0), merge_offset(0) {}
 };
@@ -37,9 +38,10 @@ struct MergeResult {
 class ReadMerger {
 private:
     // Default parameters (can be adjusted)
-    int min_overlap_len;      // Minimum overlap length required
+    int min_overlap_len;      // Minimum overlap length required (reduced to 5)
     int max_diff_count;       // Maximum allowed mismatches
     double max_diff_percent;  // Maximum allowed mismatch percentage
+    bool enable_concatenation; // Whether to concatenate when no overlap found
     
     // Internal helper functions
     std::string reverseComplement(const std::string& seq);
@@ -55,6 +57,12 @@ private:
                                const std::string& r1_qual = "",
                                const std::string& r2_qual = "");
     
+    // New function: concatenate reads when no overlap found
+    MergeResult concatenateReads(const std::string& r1_seq, 
+                                const std::string& r2_seq,
+                                const std::string& r1_qual = "",
+                                const std::string& r2_qual = "");
+    
     // Score overlap region considering quality scores
     double scoreOverlapRegion(const std::string& r1_region,
                              const std::string& r2_region,
@@ -63,20 +71,24 @@ private:
 
 public:
     // Constructor with default parameters optimized for PolyC tail processing
-    // min_overlap: minimum overlap length (default 15 for shorter overlaps in PolyC)
+    // min_overlap: minimum overlap length (reduced from 15 to 5)
     // max_diff: maximum allowed mismatches 
     // max_diff_pct: maximum allowed mismatch percentage
-    ReadMerger(int min_overlap = 15, int max_diff = 3, double max_diff_pct = 0.15) 
+    // enable_concat: whether to concatenate when no overlap found
+    ReadMerger(int min_overlap = 5, int max_diff = 2, double max_diff_pct = 0.20, 
+               bool enable_concat = true) 
         : min_overlap_len(min_overlap), max_diff_count(max_diff), 
-          max_diff_percent(max_diff_pct) {}
+          max_diff_percent(max_diff_pct), enable_concatenation(enable_concat) {}
     
     // Main merge function - sequence only
     // Processes PolyC tail data: R2 starts with GG tail
     // Returns merged sequence with R2_head(5') + overlap + R1_head(3')
+    // If no overlap found and concatenation enabled, returns concatenated sequence
     MergeResult mergeReads(const std::string& r1_seq, const std::string& r2_seq);
     
     // Main merge function - with quality scores
     // Merges quality scores by selecting higher quality base in overlap regions
+    // If no overlap found and concatenation enabled, concatenates with quality scores
     MergeResult mergeReads(const std::string& r1_seq, const std::string& r2_seq,
                           const std::string& r1_qual, const std::string& r2_qual);
     
@@ -88,11 +100,13 @@ public:
     void setMinOverlapLength(int len) { min_overlap_len = len; }
     void setMaxDiffCount(int count) { max_diff_count = count; }
     void setMaxDiffPercent(double percent) { max_diff_percent = percent; }
+    void setConcatenationEnabled(bool enabled) { enable_concatenation = enabled; }
     
     // Parameter getters
     int getMinOverlapLength() const { return min_overlap_len; }
     int getMaxDiffCount() const { return max_diff_count; }
     double getMaxDiffPercent() const { return max_diff_percent; }
+    bool isConcatenationEnabled() const { return enable_concatenation; }
     
     // Utility functions
     static std::string getSubsequence(const std::string& seq, int start, int length);
